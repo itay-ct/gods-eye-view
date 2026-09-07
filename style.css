@@ -5939,6 +5939,7 @@ body.cockpit-mode #intel-hud .hud-right-edge { right: 22px; }
 .redis-mode-switch[aria-checked="true"] .redis-switch-track::after { transform: translateX(12px); }
 .redis-mode-note { color: var(--text-dim); font-size: 9px; text-align: right; max-width: 145px; }
 .redis-active .data-toggle-meta::first-line { color: var(--text-primary, #eee); }
+.redis-active .data-toggle-meta:empty { display: none; }
 .redis-mode-warning { flex-basis: 100%; color: #efbd67; font-size: 9px; line-height: 1.4; overflow-wrap: anywhere; }
 .redis-mode-warning[hidden] { display: none; }
 

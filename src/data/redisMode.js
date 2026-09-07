@@ -196,10 +196,10 @@ export function redisMeta(manager, layer, original = '') {
   const stats = manager._redisStats?.[layer.id];
   const source = original && layer.enabled ? `\n${original}` : '';
   if (error) return `STREAM UNAVAILABLE · ${error}${source}`;
-  if (!stats) return `STREAM idle · ${layer.enabled ? 'waiting for source' : 'layer off'}${source}`;
+  if (!stats) return layer.enabled ? `Waiting for source${source}` : '';
   const n = value => Number(value || 0).toLocaleString('en-US');
   const age = stats.lastIngestedAt ? Math.max(0, Math.floor((Date.now() - stats.lastIngestedAt) / 1000)) : null;
   const ago = age === null ? 'never' : age < 60 ? `${age}s ago` : `${Math.floor(age / 60)}m ago`;
   const backlog = stats.pending || stats.lag ? `\nProcessing: ${n(stats.lag)} waiting · ${n(stats.pending)} pending` : '';
-  return `${n(stats.entriesAdded)} events · last ingested ${ago}${layer.enabled ? '' : ' · off'}${backlog}${source}`;
+  return `${n(stats.entriesAdded)} events · ${ago}${backlog}${source}`;
 }

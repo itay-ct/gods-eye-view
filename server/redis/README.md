@@ -85,7 +85,7 @@ FT.CREATE gev:military:idx ON JSON PREFIX 1 gev:military:entity: SCHEMA
 
 ## Layer statistics
 
-The main line is **“12,345 events · last ingested 3s ago”**:
+The main line is **“12,345 events · 3s ago”**. Idle, disabled layers have no metadata line:
 
 - Events = `XINFO STREAM` → `entries-added`, the lifetime total including commit events. Trimming does not reset it.
 - Last ingested = millisecond portion of `last-generated-id`, because ingestion uses automatic `XADD *` IDs.
