@@ -1,3 +1,6 @@
+import { layerFetch } from './redisMode.js';
+const fetch = layerFetch('traffic');
+
 import { PbfReader } from 'pbf';
 import { VectorTile } from '@mapbox/vector-tile';
 import { tilesForBounds } from './tomtomTiles.js';

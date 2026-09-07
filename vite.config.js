@@ -1,3 +1,4 @@
+import { redisLayersPlugin } from './server/redis/plugin.js';
 /**
  * Vite configuration for God's Eye View — a cinematic geospatial app.
  *
@@ -7740,6 +7741,7 @@ export default defineConfig(({ mode }) => {
   return {
     plugins: [
       cesium(),
+      redisLayersPlugin(),
       openSkyProxy(),
       celestrakProxy(),
       tomtomProxy(),

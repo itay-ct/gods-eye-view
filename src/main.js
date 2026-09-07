@@ -1,3 +1,4 @@
+import { installRedisMode } from './data/redisMode.js';
 import * as Cesium from 'cesium';
 import { StyleManager } from './ui.js';
 import { flyToAustin } from './camera.js';
@@ -236,6 +237,7 @@ async function init() {
         return dataManager.unregisterForQa(layerId);
       };
     }
+    installRedisMode(dataManager);
     dataManager.buildTogglePanel(document.getElementById('data-toggles'));
     styleManager.attachDataManager(dataManager);
 

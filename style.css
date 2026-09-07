@@ -5905,7 +5905,42 @@ body.cockpit-mode #intel-hud .hud-right-edge { right: 22px; }
   color: var(--text-dim);
   padding-left: 26px;
   margin-top: 2px;
+  white-space: pre-line;
 }
+
+.redis-layer-control {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 0 10px;
+  margin-bottom: 3px;
+  border-bottom: 1px solid var(--border-subtle, rgba(255,255,255,.12));
+  font-family: var(--font-mono);
+}
+.redis-mode-switch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-primary, #eee);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+.redis-mode-switch:focus-visible { outline: 1px solid #ff665d; outline-offset: 4px; }
+.redis-mode-switch:disabled { opacity: .6; cursor: wait; }
+.redis-switch-track { width: 28px; height: 16px; border-radius: 12px; background: #555; padding: 3px; box-sizing: border-box; }
+.redis-switch-track::after { content: ''; display: block; width: 10px; height: 10px; border-radius: 50%; background: #eee; }
+.redis-mode-switch[aria-checked="true"] .redis-switch-track { background: #dc453e; }
+.redis-mode-switch[aria-checked="true"] .redis-switch-track::after { transform: translateX(12px); }
+.redis-mode-note { color: var(--text-dim); font-size: 9px; text-align: right; max-width: 145px; }
+.redis-active .data-toggle-meta::first-line { color: var(--text-primary, #eee); }
+.redis-mode-warning { flex-basis: 100%; color: #efbd67; font-size: 9px; line-height: 1.4; overflow-wrap: anywhere; }
+.redis-mode-warning[hidden] { display: none; }
 
 /* Optional per-layer sub-controls: mode chips plus a color legend. Aligned
    under the layer name like .data-toggle-meta, and wrapping so a legend can

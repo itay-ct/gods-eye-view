@@ -1,3 +1,6 @@
+import { layerFetch } from './redisMode.js';
+const fetch = layerFetch('flights');
+
 /**
  * @module flights
  * @description Real-time flight tracking layer powered by the OpenSky Network API

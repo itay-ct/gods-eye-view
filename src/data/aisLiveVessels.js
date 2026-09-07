@@ -1,3 +1,6 @@
+import { layerFetch } from './redisMode.js';
+const fetch = layerFetch('ais-live-vessels');
+
 import * as Cesium from 'cesium';
 import {
   registerEntityContext,

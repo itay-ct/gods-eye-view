@@ -48,6 +48,7 @@
     "egm96-universal": "^1.1.1",
     "mgrs": "^2.1.0",
     "pbf": "^5.1.2",
+    "redis": "^5.12.1",
     "satellite.js": "^6.0.2"
   },
   "devDependencies": {

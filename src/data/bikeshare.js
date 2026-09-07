@@ -1,3 +1,6 @@
+import { layerFetch } from './redisMode.js';
+const fetch = layerFetch('bikeshare');
+
 /**
  * @module bikeshare
  * @description GBFS bikeshare station data overlay with real-time availability.

@@ -1,3 +1,6 @@
+import { layerFetch } from './redisMode.js';
+const fetch = layerFetch('military');
+
 /**
  * Shared military-aircraft ICAO24 registry (2026-06-10 playtest fix).
  *

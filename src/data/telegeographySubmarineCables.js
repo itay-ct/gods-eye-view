@@ -1,3 +1,6 @@
+import { layerFetch } from './redisMode.js';
+const fetch = layerFetch('telegeography-submarine-cables');
+
 import * as Cesium from 'cesium';
 import {
   clearOverlaySource,

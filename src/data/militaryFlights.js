@@ -1,3 +1,6 @@
+import { layerFetch } from './redisMode.js';
+const fetch = layerFetch('military');
+
 import * as Cesium from 'cesium';
 import { aircraftIncludedInNearby } from './aircraftNearbyPolicy.js';
 import { registerPickOwner, unregisterPickOwner, isOwnedByOtherLayer, resolvePickId } from './pickRegistry.js';

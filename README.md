@@ -1,3 +1,84 @@
+# God's Eye View — Redis Streams & Search Demo
+
+> **Built on [God's Eye View by Bilawal Sidhu](https://github.com/bilawalsidhu/gods-eye-view).**
+> The original globe, visual design, rendering engine, data integrations, and GEV experience come from
+> Bilawal Sidhu and the upstream contributors. Please visit and support the **[original project](https://github.com/bilawalsidhu/gods-eye-view)**.
+> This fork adds a local Redis demonstration. The upstream [MIT license and attribution](LICENSE) are retained.
+
+This [demo fork](https://github.com/itay-ct/gods-eye-view) demonstrates **Redis Streams ingestion and
+Search-ready entity storage** with minimal changes to GEV's existing map and source adapters:
+
+```text
+Enabled layer → existing source adapter → Redis Stream → consumer group
+                                                        ├─ entity JSON → snapshot endpoint → GEV map
+                                                        └─ shared Count-Min Sketch
+
+Redis Search → indexes and queries the individual entity JSON documents
+```
+
+**Current Search scope:** entity documents expose native, indexable fields. Integration tests create an
+`ON JSON` index and run `FT.SEARCH`; you can use Redis CLI or RedisInsight to create and query an index
+following the [Search example](server/redis/README.md#redis-search-readiness). A query panel, automatic index
+creation, and `FT.AGGREGATE` UI are not implemented yet.
+
+## What this fork adds
+
+| Change | Behavior |
+| --- | --- |
+| **Redis / No Redis toggle** | Added above Data Layers. No Redis uses original GEV fetching; Redis routes all 15 pane layers through the pipeline. The choice is per browser tab. |
+| **Streams and consumer groups** | One Stream per layer, projected by the `view-projector` group. Source adapters and their caching remain in use. |
+| **Individual entity documents** | One native RedisJSON document per object, with named fields such as ID, label, location, altitude, and speed, plus nested source data. No giant collection hash of serialized objects. |
+| **Search-ready storage** | Stable entity-key prefixes and native JSON fields support Redis Search indexes and queries. Real Search integration tests verify indexing. |
+| **Count-Min Sketch** | One shared sketch per layer counts changed source records by entity ID; identical records do not increment it. |
+| **Redis-backed view reads** | Ingestion returns a receipt; the browser separately reads a snapshot assembled from Redis entities. Successful map-data responses do not fall back to direct sources. |
+| **Compact snapshots** | Small native JSON metadata and an ordered Redis List of entity keys preserve GEV's response format. Shared membership is inside entity JSON, with no separate owner sets. |
+| **Stream statistics** | Layer text uses `XINFO STREAM` lifetime `entries-added` and `last-generated-id`, with pending/lag details and exact values on hover. |
+| **Bounded retention** | A 10,000-entry target per Stream uses acknowledged-only trimming; unprocessed entries are protected and intake pauses when the backlog grows too large. |
+| **Failure and flush recovery** | A warning below the toggle reports failures. Missing Streams, groups, and sketches are rebuilt after a manual flush. The browser reloads its current view to repopulate layers; interrupted requests retry once through Redis. |
+| **Layer-aware ingestion** | OFF blocks new ingestion and cancels pending browser/server work, including background helper requests. Already accepted events may finish processing. Turning ON resumes intake. |
+
+Existing entities and history remain subject to their retention after a layer is switched off. Another tab
+with that layer ON can still write to the shared Stream. Base-map tiles, terrain, media, and GEV's browser-side
+simulation/interpolation keep their original paths.
+
+## Run the Redis demo locally
+
+Use Node.js **24.14+ within 24.x, or 26.x**, and Docker. Redis **8.2+ with JSON and Count-Min Sketch** is
+required; this demo has been tested with Redis 8.10.0.
+
+```sh
+git clone https://github.com/itay-ct/gods-eye-view.git
+cd gods-eye-view
+npm install
+
+docker run -d --name gev-redis -p 127.0.0.1:6379:6379 \
+  -v gev-redis-data:/data redis:8.10.0 \
+  redis-server --appendonly yes --maxmemory 768mb --maxmemory-policy noeviction
+
+npm run dev -- --host 127.0.0.1 --port 4173 --strictPort
+```
+
+Open [the local demo](http://127.0.0.1:4173), expand **Data Layers**, select **Redis**, and enable a layer.
+For a previously created container, use `docker start gev-redis`. Optional server settings are `REDIS_URL`
+(default `redis://127.0.0.1:6379`) and `REDIS_STREAM_MAXLEN` (default `10000`). Configure provider keys locally
+using GEV's original setup; `.env` and credentials are not included in this repository.
+
+This integration currently runs through the **Vite development server**. Recording/offline replay, Pub/Sub
+browser notifications, a Redis query UI, and a separate production Redis server adapter are future work.
+
+See the [Redis implementation guide](server/redis/README.md) for the key model, Search example, retention,
+recovery, and test commands. [demo-implementation.md](demo-implementation.md) is a preserved earlier planning
+specification; it describes broader proposals and is **not the current implementation contract**.
+
+Validation for this increment: **118 Redis and layer-manager tests passed**, the production frontend build
+passed, and isolated browser checks verified Redis-only reads, flush recovery, and OFF/ON ingestion behavior.
+
+---
+
+## Original project README
+
+The upstream README follows, preserving the original project's presentation, setup guidance, and attribution.
+
 <div align="center">
 
 # 🌐 God's Eye View

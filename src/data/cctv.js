@@ -1,3 +1,6 @@
+import { layerFetch, projectLocalRecords } from './redisMode.js';
+const fetch = layerFetch('cctv');
+
 /**
  * @module cctv
  *
@@ -4191,7 +4194,7 @@ const cctvLayer = {
 
     const sources = await loadCameraSources();
     const catalogFromSources = buildCatalogFromSources(sources);
-    const catalog = catalogFromSources.length ? catalogFromSources : seedCatalog();
+    const catalog = catalogFromSources.length ? catalogFromSources : await projectLocalRecords('cctv', seedCatalog());
 
     // Viewshed color identity (design §3a): golden-angle hue over the
     // id-SORTED catalog index — deterministic across sessions for a stable

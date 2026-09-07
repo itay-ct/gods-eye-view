@@ -1,3 +1,4 @@
+import { layerFetch } from './redisMode.js';
 import * as Cesium from 'cesium';
 import { governorRequestRender } from '../renderGovernor.js';
 import {
@@ -291,6 +292,7 @@ export function createLocalGeoJsonLayer({
   screenSpaceEventHandlerFactory = (canvas) => new Cesium.ScreenSpaceEventHandler(canvas),
   projectToWindow = (scene, position) => Cesium.SceneTransforms.worldToWindowCoordinates(scene, position),
 }) {
+  const fetch = layerFetch(id);
   let _dataSource = null;
   let _enabled = false;
   let _clickHandler = null;

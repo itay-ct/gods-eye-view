@@ -1,3 +1,6 @@
+import { layerFetch } from './redisMode.js';
+const fetch = layerFetch('traffic');
+
 import * as Cesium from 'cesium';
 import { deriveFetchCenter, clampBoundsAroundCenter } from './trafficBounds.js';
 import { fetchFlowForBounds, getFlowSessionStats, resetFlowTileCache } from './flowTiles.js';

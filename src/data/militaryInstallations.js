@@ -1,3 +1,6 @@
+import { layerFetch } from './redisMode.js';
+const fetch = layerFetch('military-installations');
+
 import * as Cesium from 'cesium';
 import { governorRequestRender } from '../renderGovernor.js';
 import {

@@ -1893,6 +1893,7 @@ export class DataLayerManager {
    * Should be called when the viewer is being torn down.
    */
   async destroyAll() {
+    this.disposePanelExtension?.();
     for (const layerId of [...this.layers.keys()]) {
       await this.destroyLayer(layerId);
     }
@@ -2021,6 +2022,7 @@ export class DataLayerManager {
   _renderToggles() {
     if (!this._toggleContainer) return;
     this._toggleContainer.innerHTML = '';
+    if (this.createPanelHeader) this._toggleContainer.appendChild(this.createPanelHeader());
 
     for (const layer of this.getAll()) {
       if (!layer.showInTogglePanel) continue;
@@ -2208,6 +2210,11 @@ export class DataLayerManager {
   }
 
   _buildMetaText(layer) {
+    const original = this._buildSourceMetaText(layer);
+    return this.formatLayerMeta?.(layer, original) ?? original;
+  }
+
+  _buildSourceMetaText(layer) {
     const stats = layer.stats || {};
     const feedState = layerFeedState(stats);
     const stateLabel = FEED_STATE_LABELS[feedState];

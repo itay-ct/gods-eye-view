@@ -1,3 +1,6 @@
+import { layerFetch } from './redisMode.js';
+const fetch = layerFetch('radio');
+
 /**
  * Internet-radio station directory and direct-playback layer.
  *
