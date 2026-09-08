@@ -86,6 +86,25 @@ const GROUP_CLASS = Object.freeze({
   dense: Object.freeze({ klass: 'comms', subtype: 'STARLINK' }),
 });
 
+// Shared with the Redis projector: source priority must match map deduplication.
+export const SATELLITE_CATALOG_GROUPS = Object.freeze([
+  { tag: 'stations', path: 'stations' },
+  { tag: 'visual', path: 'visual' },
+  { tag: 'gps-ops', path: 'gps-ops' },
+  { tag: 'glonass', path: 'glo-ops' },
+  { tag: 'galileo', path: 'galileo' },
+  { tag: 'geo', path: 'geo' },
+]);
+
+export function satelliteSourceGroup(url) {
+  const path = String(url).match(/\/api\/celestrak\/([^/?]+)/)?.[1];
+  const groups = [...SATELLITE_CATALOG_GROUPS, { tag: 'dense', path: 'starlink' }];
+  const priority = groups.findIndex(group => group.path === path);
+  if (priority < 0) return null;
+  const group = groups[priority].tag;
+  return { group, type: satelliteClassLabel(group), priority };
+}
+
 /** Unknown groups fall back to the neutral bucket rather than vanishing. */
 const FALLBACK = Object.freeze({ klass: 'visual', subtype: null });
 

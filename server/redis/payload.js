@@ -1,4 +1,6 @@
 import { createHash } from 'node:crypto';
+import { satelliteSourceGroup } from '../../src/data/satelliteClass.js';
+import { satelliteFields } from './satellite.js';
 
 const collections = new Set(['states', 'ac', 'rows', 'features', 'elements', 'stations', 'sources', 'fires', 'results', 'feeds', 'samples', 'places']);
 export const digest = (value) => createHash('sha256').update(value).digest('hex');
@@ -31,7 +33,8 @@ export function packBody(buffer, contentType = '', url = '') {
       // Distinguish different source record families and scoped GBFS station IDs.
       const scope = url.includes('/api/gbfs') ? digest(url).slice(0, 12) :
         url.includes('landing-point-geo') ? 'landing-points' : kind;
-      records.push({ id, item, kind, entityKey: `${scope}:${encodeURIComponent(item)}${occurrence ? `:${occurrence}` : ''}`, data: JSON.stringify(row) });
+      records.push({ id, item, kind, entityKey: `${scope}:${encodeURIComponent(item)}${occurrence ? `:${occurrence}` : ''}`, data: JSON.stringify(row),
+        ...(url.includes('/api/celestrak/') ? { satelliteGroup: satelliteSourceGroup(url) } : {}) });
     }
     groups.push({ path, ids });
     return null;
@@ -83,7 +86,8 @@ export function entityDocument(layer, cohort, record) {
     label: String((isState ? source[1] : source?.callsign ?? source?.flight ?? source?.name ?? source?.properties?.name) || record.item).trim(),
     latitude, longitude, altitudeM, speedMps,
     location: latitude !== null && longitude !== null && Math.abs(latitude) <= 90 && Math.abs(longitude) <= 180 ? `${longitude},${latitude}` : null,
-    fingerprint: digest(record.data), source };
+    fingerprint: digest(record.data), source,
+    ...(layer === 'satellites' && source.text ? satelliteFields(source.text, record.satelliteGroup) : {}) };
 }
 
 export function unpackBody(manifest, fields) {

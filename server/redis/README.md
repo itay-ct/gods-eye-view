@@ -6,7 +6,7 @@ This increment uses the Vite development server; `.env` and `demo-implementation
 
 ## Local Redis
 
-Redis 8.2+ with JSON and Count-Min Sketch is required; tested with Redis 8.10.0.
+Redis 8.2+ with JSON, Search and Count-Min Sketch is required; tested with Redis 8.10.0.
 
 ```sh
 docker run -d --name gev-redis -p 127.0.0.1:6379:6379 \
@@ -71,8 +71,40 @@ XLEN gev:military:stream
 
 ## Redis Search readiness
 
-No permanent Search index is created yet. A real temporary `ON JSON` index is exercised by the integration test.
-For example, an aircraft index can use:
+Satellites automatically create `gev:satellites:idx` on the individual JSON documents:
+
+```text
+FT.CREATE gev:satellites:idx ON JSON PREFIX 1 gev:satellites:entity: STOPWORDS 0 SCHEMA
+  $.name AS name TEXT NOSTEM
+  $.type AS type TEXT NOSTEM
+  $.collections[*] AS collections TAG
+FT.SEARCH gev:satellites:idx '@name:(ISS) @type:(STATION)' LIMIT 0 100
+```
+
+With Redis ON, use **Filter** below the satellite ON/OFF button, edit **Name** or choose **Type**. Each change immediately queries Redis Search; newer input cancels the previous refresh.
+Name matches word prefixes, case-insensitively: `STAR` searches `@name:(STAR*)` and matches `STARLINK`.
+Prefixes require two characters; single-character words match literally. Choose a category from the Type dropdown,
+or All types. Words and fields combine with AND; an empty name is unrestricted.
+Types use the same catalog classification as the map: STATION, NAV · GPS/GLONASS/GALILEO, GEO, VISUAL,
+and COMMS · STARLINK (enable DENSE for Starlink). This is a catalog category, not a payload/mission type inferred
+from TLE. Existing DENSE controls remain available; the class-count legend is replaced by the filter form.
+Toggle Filter off to restore the full catalog. Filters are local to the current page and clear on reload.
+
+Each input change re-reads cached snapshot references using `FT.SEARCH`, scoped to each source collection. It does not
+increment the Stream or CMS. An expired/missing snapshot is re-ingested through the normal Stream path.
+Scheduled feed refreshes still ingest the complete catalog, then filter only the view. Empty Search results
+clear the visualization, and result limits cover the complete snapshot rather than Redis's default first 10.
+An index removed by a flush or `FT.DROPINDEX` is recreated, with reads waiting for background indexing.
+
+Satellite JSON also exposes `name`, `type`, `group`, `internationalDesignator`, `classification`, and an `orbit`
+object with epoch, inclination, ascending node, eccentricity, argument of perigee, mean anomaly, mean motion,
+revolution number and B* drag term. `classification` is the TLE security-classification letter, separate from type.
+Position/altitude/speed are SGP4 estimates at `positionAt`; `positionStatus` indicates whether propagation succeeded.
+They are not live measurements. The browser still propagates the retained `source.text` using original GEV code.
+On the next normal ingestion, existing satellite documents gain these fields through the Stream projector.
+Overlapping catalog groups follow GEV's priority rather than last-arrival order.
+
+Other layers remain ready for indexes. For example, an aircraft index can use:
 
 ```text
 FT.CREATE gev:military:idx ON JSON PREFIX 1 gev:military:entity: SCHEMA

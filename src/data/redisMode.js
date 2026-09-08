@@ -1,5 +1,10 @@
+import { createSatelliteFilter, satelliteFilter, satelliteFilterOpen } from './redisSatelliteFilter.js';
+
 let layerManager = null;
 const layerRequests = new Map();
+const satelliteReceipts = new Map();
+let satelliteReadOnly = 0;
+export const redisSatelliteFilterActive = () => redisEnabled() && satelliteFilter() !== null;
 
 function cancelLayerRequests(layer) {
   layerRequests.get(layer)?.abort(new DOMException('Redis layer is off', 'AbortError'));
@@ -32,10 +37,24 @@ export function installRedisMode(manager) {
     return createRedisControl(manager);
   };
   manager.formatLayerMeta = (layer, original) => redisMeta(manager, layer, original);
+  manager.extendLayerRow = (layer, row) => {
+    if (layer.id !== 'satellites' || !redisEnabled()) return;
+    createSatelliteFilter(row, {
+      enabled: () => manager.isEffectivelyEnabled('satellites'),
+      changed: () => manager._refreshTogglePanel(),
+      refresh: async (signal) => {
+        cancelLayerRequests('satellites');
+        satelliteReadOnly++;
+        try { return await manager.refreshLayer('satellites', {signal}); }
+        finally { satelliteReadOnly--; }
+      },
+    });
+  };
   manager.disposePanelExtension = () => {
     unsubscribeIntent(); unsubscribeState(); unsubscribeDestroy();
     for (const layer of layerRequests.keys()) cancelLayerRequests(layer);
     if (layerManager === manager) layerManager = null;
+    satelliteReceipts.clear();
     clearInterval(manager._redisStatsTimer);
     manager._redisStatsTimer = null;
   };
@@ -50,24 +69,33 @@ export function layerFetch(layer) {
     // A radio listener click is a provider interaction, not a map-data update.
     if (layer === 'radio' && url.pathname.startsWith('/api/radio/click/')) return globalThis.fetch(input, init);
     const source = url.origin === globalThis.location.origin ? url.pathname + url.search : url.href;
+    const filter = layer === 'satellites' ? satelliteFilter() : null;
+    if (layer === 'satellites' && (satelliteReadOnly || init.redisReadOnly) && satelliteReceipts.has(source)) {
+      const response = await readProjection(Response.json(satelliteReceipts.get(source)), signal, filter);
+      if (response.status !== 503) return response;
+      const failure = await response.clone().json().catch(() => ({}));
+      if (!/Redis snapshot not found|Redis snapshot membership incomplete|Redis entity missing from snapshot/.test(failure.error || '')) return response;
+      // Snapshot expiration/FLUSHDB: repopulate through the Stream before retrying.
+    }
     const ingest = () => globalThis.fetch('/api/redis/ingest', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ layer, url: source, method: init.method || 'GET', body: init.body }),
       signal,
       cache: 'no-store',
     });
-    return ingestAndRead(ingest, signal);
+    return ingestAndRead(ingest, signal, filter, layer === 'satellites'
+      ? receipt => satelliteReceipts.set(source, receipt) : null);
   };
 }
 
 // A reset can happen between the ingest receipt and the read. Retry the full
 // Redis path once; never return source data directly or ignore cancellation.
-export async function ingestAndRead(ingest, signal) {
+export async function ingestAndRead(ingest, signal, filter = null, onReceipt = null) {
   for (let attempt = 0; attempt < 2; attempt++) {
     signal?.throwIfAborted();
     const receipt = await ingest();
     if (!receipt.ok) return receipt;
-    const result = await readProjection(receipt, signal);
+    const result = await readProjection(receipt, signal, filter, onReceipt);
     if (result.status !== 503 || attempt === 1) return result;
   }
 }
@@ -77,15 +105,18 @@ export function redisResetDetected(previous, current) {
     stats.epoch && previous?.[id]?.epoch && stats.epoch !== previous[id].epoch);
 }
 
-async function readProjection(receipt, signal) {
+async function readProjection(receipt, signal, filter = null, onReceipt = null) {
   if (!receipt.ok) return receipt;
   const { snapshotUrl, headers } = await receipt.json();
   if (typeof snapshotUrl !== 'string' || !snapshotUrl.startsWith('/api/redis/snapshot?')) throw new Error('Invalid Redis snapshot reference');
-  const response = await globalThis.fetch(snapshotUrl, { signal, cache: 'no-store' });
+  onReceipt?.({snapshotUrl, headers});
+  const query = filter ? `&${new URLSearchParams({filter: '1', ...filter})}` : '';
+  const response = await globalThis.fetch(snapshotUrl + query, { signal, cache: 'no-store' });
   if (!response.ok) return response;
   if (response.headers.get('x-gev-data-path') !== 'redis-json') throw new Error('Response was not read from Redis entities');
   return new Response(await response.arrayBuffer(), { status: response.status,
-    headers: { ...headers, 'x-gev-data-path': 'redis-json' } });
+    headers: { ...headers, 'x-gev-data-path': 'redis-json',
+      ...(response.headers.get('x-gev-filtered') === '1' ? {'x-gev-filtered': '1'} : {}) } });
 }
 
 export async function projectLocalRecords(layer, records) {
@@ -194,7 +225,7 @@ export function redisMeta(manager, layer, original = '') {
   if (!redisEnabled()) return null;
   const error = manager._redisError || manager._redisStats?.[layer.id]?.error;
   const stats = manager._redisStats?.[layer.id];
-  const source = original && layer.enabled ? `\n${original}` : '';
+  const source = original && layer.enabled && !(layer.id === 'satellites' && satelliteFilterOpen()) ? `\n${original}` : '';
   if (error) return `STREAM UNAVAILABLE · ${error}${source}`;
   if (!stats) return layer.enabled ? `Waiting for source${source}` : '';
   const n = value => Number(value || 0).toLocaleString('en-US');

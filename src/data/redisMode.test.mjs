@@ -60,6 +60,45 @@ test('a changed Redis generation triggers recovery, ordinary stats and first loa
   assert.equal(redisResetDetected({military: {epoch: 'a'}}, {military: {epoch: 'b'}}), true);
 });
 
+test('satellite filter refresh reuses Redis references and only reingests a missing projection', async () => {
+  const storage = Object.getOwnPropertyDescriptor(globalThis, 'sessionStorage');
+  const originalFetch = globalThis.fetch, originalLocation = globalThis.location;
+  Object.defineProperty(globalThis, 'sessionStorage', {configurable: true, value: {getItem: () => 'yes'}});
+  globalThis.location = {href: 'http://localhost:4173/', origin: 'http://localhost:4173'};
+  const manager = managerFixture();
+  manager.setEnabled('satellites', true);
+  let ingests = 0, failure = null;
+  globalThis.fetch = async url => {
+    if (url === '/api/redis/ingest') {
+      ingests++;
+      return Response.json({snapshotUrl: '/api/redis/snapshot?layer=satellites&cohort=a', headers: {'content-type': 'text/plain'}});
+    }
+    if (failure) {
+      const error = failure; failure = null;
+      return Response.json({error}, {status: 503});
+    }
+    return new Response('Redis TLE', {headers: {'x-gev-data-path': 'redis-json', 'x-gev-filtered': '1'}});
+  };
+  try {
+    const read = layerFetch('satellites');
+    await read('/api/celestrak/visual');
+    const response = await read('/api/celestrak/visual', {redisReadOnly: true});
+    assert.equal(await response.text(), 'Redis TLE');
+    assert.equal(response.headers.get('x-gev-filtered'), '1', 'empty-result authority survives the adapter');
+    assert.equal(ingests, 1);
+    failure = 'Redis Search connection unavailable';
+    assert.equal((await read('/api/celestrak/visual', {redisReadOnly: true})).status, 503);
+    assert.equal(ingests, 1, 'Search errors must not create source updates');
+    failure = 'Redis snapshot not found';
+    assert.equal((await read('/api/celestrak/visual', {redisReadOnly: true})).status, 200);
+    assert.equal(ingests, 2, 'expired/reset snapshots recover through the Stream');
+  } finally {
+    manager.disposePanelExtension(); globalThis.fetch = originalFetch;
+    if (originalLocation === undefined) delete globalThis.location; else globalThis.location = originalLocation;
+    if (storage) Object.defineProperty(globalThis, 'sessionStorage', storage); else delete globalThis.sessionStorage;
+  }
+});
+
 test('a flush between receipt and snapshot retries the Redis path once and respects abort', async () => {
   const original = globalThis.fetch;
   let ingests = 0, reads = 0;

@@ -1,5 +1,6 @@
 import { RedisPipeline } from './pipeline.js';
 import { digest, packBody } from './payload.js';
+import { satelliteQuery } from './satelliteSearch.js';
 
 const paths = {
   flights: [/^\/api\/opensky(?:-track)?$/, /^\/api\/adsbdb\//],
@@ -86,9 +87,15 @@ export function redisLayersPlugin({pipelineOptions} = {}) {
             const cohort = query.get('cohort');
             if (!Object.hasOwn(paths, layer) || !/^(?:[a-f0-9]{24}|bundled)$/.test(cohort || '')) return json(res, 400, { error: 'Invalid snapshot reference' });
             requestLayer = layer;
-            const body = await pipeline.snapshot(layer, cohort);
+            const filter = query.get('filter') === '1' ? { name: query.get('name') || '', type: query.get('type') || '' } : null;
+            if (filter) {
+              if (layer !== 'satellites') return json(res, 400, {error: 'Only satellites support filtering'});
+              try { satelliteQuery(filter); } catch (error) { return json(res, 400, {error: error.message}); }
+            }
+            const body = await pipeline.snapshot(layer, cohort, null, filter);
             errors.delete(`${requestLayer}:${route}`);
-            res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Cache-Control': 'no-store', 'X-GEV-Data-Path': 'redis-json' });
+            res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Cache-Control': 'no-store', 'X-GEV-Data-Path': 'redis-json',
+              ...(filter ? {'X-GEV-Filtered': '1'} : {}) });
             return res.end(body);
           }
           if (!['/ingest', '/local'].includes(route) || req.method !== 'POST') return json(res, 404, { error: 'Unknown Redis endpoint' });

@@ -1,4 +1,4 @@
-import { layerFetch } from './redisMode.js';
+import { layerFetch, redisSatelliteFilterActive } from './redisMode.js';
 const fetch = layerFetch('satellites');
 
 import * as Cesium from 'cesium';
@@ -21,6 +21,7 @@ import {
   satelliteClassLabel,
   satelliteClassLegend,
   tallySatelliteClasses,
+  SATELLITE_CATALOG_GROUPS,
 } from './satelliteClass.js';
 import {
   clearOverlaySource,
@@ -74,14 +75,7 @@ const RING_ROTATION_MS = 1000;   // re-align baked orbit rings to current GMST e
  * Note: CelesTrak's GLONASS group is named 'glo-ops' (not
  * 'glonass-operational' — that name 404s upstream).
  */
-const CATALOG_GROUPS = [
-  { tag: 'stations', path: 'stations' },
-  { tag: 'visual', path: 'visual' },
-  { tag: 'gps-ops', path: 'gps-ops' },
-  { tag: 'glonass', path: 'glo-ops' },
-  { tag: 'galileo', path: 'galileo' },
-  { tag: 'geo', path: 'geo' },
-];
+const CATALOG_GROUPS = SATELLITE_CATALOG_GROUPS;
 
 // Dense-catalog mode (setParams({ catalog: 'dense' })): Starlink shell as
 // points-only extras — no labels, no detection-overlay participation, and a
@@ -897,6 +891,11 @@ async function _reconcileTrackedSubjectContext() {
   // Believing the old group alone would drop it. Any failed or empty group is
   // therefore a reason to wait — and `accepted` already means every group
   // returned entries.
+  if (redisSatelliteFilterActive() && _lastTrackingRefreshOutcome?.status === 'accepted'
+      && (!denseSettlement || _denseStatus === 'ready')) {
+    _clearTracking();
+    return;
+  }
   if (_catalog.size === 0) return;
   if (_lastTrackingRefreshOutcome?.status !== 'accepted') return;
   // Dense is a potential carrier too whenever it was REQUESTED — and the
@@ -1151,7 +1150,7 @@ async function _loadDenseCatalog({ signal = null } = {}) {
     // an HTML error page the proxy passed through, or a feed of TLEs the core
     // catalog already owns. Treating it as success is the same lie as treating
     // a 502 as success, just through a different door.
-    if (added === 0) {
+    if (added === 0 && res.headers?.get('x-gev-filtered') !== '1') {
       console.warn(`[Data:Satellites] Dense group '${DENSE_GROUP_PATH}' returned no usable satellites`);
       _denseLoadFailed(token, 'feed returned no satellites');
       return { status: 'source-unavailable', reason: 'feed returned no satellites' };
@@ -1633,18 +1632,25 @@ const satellitesLayer = {
       updateSignal.throwIfAborted();
       // Load all core groups in parallel; a failed/empty group degrades
       // gracefully (parseTLE of an upstream error body yields []).
-      const results = await Promise.all(CATALOG_GROUPS.map(async (groupDef) => {
+      const readGroup = async (groupDef, redisReadOnly = false) => {
         try {
-          const res = await fetch(`/api/celestrak/${groupDef.path}`, { signal: updateSignal });
+          const res = await fetch(`/api/celestrak/${groupDef.path}`, { signal: updateSignal, ...(redisReadOnly ? {redisReadOnly: true} : {}) });
           if (!res.ok) return { ...groupDef, entries: [], ok: false };
           const entries = parseTLE(await res.text());
           updateSignal.throwIfAborted();
-          return { ...groupDef, entries, ok: entries.length > 0 };
+          return { ...groupDef, entries, ok: entries.length > 0 || res.headers?.get('x-gev-filtered') === '1' };
         } catch (error) {
           if (updateSignal.aborted || error?.name === 'AbortError') throw error;
           return { ...groupDef, entries: [], ok: false };
         }
-      }));
+      };
+      let results = await Promise.all(CATALOG_GROUPS.map(group => readGroup(group)));
+      // Overlapping feeds commit in arbitrary order. Query again once they all
+      // settle so Search sees the same canonical type used by GEV's dedupe.
+      if (redisSatelliteFilterActive()) {
+        results = await Promise.all(CATALOG_GROUPS.map(group => readGroup(group, true)));
+        if (results.some(result => !result.ok)) throw new Error('Satellite Redis Search unavailable; previous view retained');
+      }
       updateSignal.throwIfAborted();
 
       const failed = results.filter(r => !r.ok).map(r => r.path);
@@ -1773,6 +1779,7 @@ const satellitesLayer = {
         throw new DOMException('Satellite update aborted', 'AbortError');
       }
       console.warn('[Data:Satellites] Fetch error:', e);
+      if (redisSatelliteFilterActive()) throw e;
     } finally {
       _activeUpdateControllers.delete(resourceController);
     }

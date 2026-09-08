@@ -2094,6 +2094,7 @@ export class DataLayerManager {
         this._syncRowControls(controls, layer);
       }
 
+      this.extendLayerRow?.(layer, row);
       this._toggleContainer.appendChild(row);
     }
   }

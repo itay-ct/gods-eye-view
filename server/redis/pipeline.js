@@ -2,6 +2,8 @@ import { createClient } from 'redis';
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { unpackBody, entityDocument } from './payload.js';
+import { satelliteSourceGroup } from '../../src/data/satelliteClass.js';
+import { ensureSatelliteIndex, satelliteQuery } from './satelliteSearch.js';
 
 export const GROUP = 'view-projector';
 const CONSUMER = 'local-view'; // One local projector; restart drains its own pending list first.
@@ -39,6 +41,25 @@ local function memberships(key, cohort, includeCurrent)
   if includeCurrent then table.insert(result, cohort) end
   return result
 end
+-- The same satellite can appear in several feeds. Match GEV's first-group
+-- priority, independent of the order in which those feeds finish ingesting.
+local function satelliteType(key, collections, incoming)
+  if not string.find(KEYS[2], ':satellites$') then return end
+  local best = nil
+  for _, cohort in ipairs(collections) do
+    local raw = redis.call('JSON.GET', KEYS[2] .. ':snapshot:' .. cohort)
+    local metadata = raw and cjson.decode(raw) or nil
+    if incoming and cohort == incoming.cohort then metadata = incoming.metadata end
+    local group = metadata and metadata.satelliteGroup
+    if group and group ~= cjson.null and (not best or group.priority < best.priority) then best = group end
+  end
+  if best then
+    redis.call('JSON.SET', key, '.group', cjson.encode(best.group))
+    local id = redis.call('JSON.GET', key, '.id')
+    local label = tonumber(cjson.decode(id)) == 25544 and 'STATION · ISS' or best.type
+    redis.call('JSON.SET', key, '.type', cjson.encode(label))
+  end
+end
 for _, event in ipairs(events) do
   local m = event.message
   if not m.epoch or m.epoch == ARGV[5] then
@@ -70,6 +91,7 @@ for _, event in ipairs(events) do
         redis.call('JSON.SET', record.key, '$', documents[i])
         redis.call('JSON.DEL', record.key, '.cohort')
         redis.call('JSON.SET', record.key, '.collections', cjson.encode(collections))
+        satelliteType(record.key, collections, {cohort = m.cohort, metadata = cjson.decode(m.metadata)})
         redis.call('EXPIRE', record.key, ARGV[3])
         redis.call('RPUSH', members, record.key)
         redis.call('DEL', staging .. ':' .. record.id)
@@ -78,7 +100,10 @@ for _, event in ipairs(events) do
         if not wanted[key] then
           local collections = memberships(key, m.cohort, false)
           if #collections == 0 then redis.call('DEL', key)
-          else redis.call('JSON.SET', key, '.collections', cjson.encode(collections)) end
+          else
+            redis.call('JSON.SET', key, '.collections', cjson.encode(collections))
+            satelliteType(key, collections, nil)
+          end
         end
       end
       redis.call('EXPIRE', members, ARGV[3])
@@ -97,7 +122,8 @@ return #events
 export function snapshotMetadata(manifest, source = '') {
   return { encoding: manifest.encoding, template: manifest.template,
     groups: manifest.groups.map(({path, ids}) => ({path, count: ids.length})),
-    count: manifest.items.length, token: manifest.token, source };
+    count: manifest.items.length, token: manifest.token, source,
+    ...(satelliteSourceGroup(source) ? { satelliteGroup: satelliteSourceGroup(source) } : {}) };
 }
 
 export class RedisPipeline {
@@ -152,6 +178,7 @@ export class RedisPipeline {
     if (this.closed) throw new Error('Redis pipeline closed');
     const client = await this.connect();
     const keys = this.keys(layer);
+    if (layer === 'satellites') await ensureSatelliteIndex(client, this.prefix);
     const previous = this.layers.get(layer);
     if (previous) await previous.ready.catch(() => {});
     const epoch = await client.eval(HEALTH, {
@@ -324,25 +351,44 @@ export class RedisPipeline {
     if (state.error) throw new Error(`Redis projector: ${state.error}`);
   }
   /** Read-only view: no upstream fetch, XADD, projection, or fallback occurs here. */
-  async snapshot(layer, cohort, token = null) {
+  async snapshot(layer, cohort, token = null, filter = null) {
     const client = await this.connect();
     const { base } = this.keys(layer);
+    if (filter && layer !== 'satellites') throw new Error('Filtering is only supported for satellites');
+    const terms = filter ? satelliteQuery(filter) : '';
+    const query = filter ? `${terms === '*' ? '' : `(${terms}) `}@collections:{${cohort.replace(/[^\w]/g, '\\$&')}}` : '';
+    const index = filter ? await ensureSatelliteIndex(client, this.prefix) : '';
     // Read the metadata, ordered references and entity sources atomically.
     const result = await client.eval(`
       local metadata = redis.call('JSON.GET', KEYS[1])
       if not metadata then return redis.error_reply('Redis snapshot not found') end
       local keys = redis.call('LRANGE', KEYS[1] .. ':members', 0, -1)
       if #keys ~= cjson.decode(metadata).count then return redis.error_reply('Redis snapshot membership incomplete') end
+      local matches = nil
+      if ARGV[1] ~= '' then
+        matches = {}
+        if #keys > 0 then
+          local found = redis.call('FT.SEARCH', ARGV[2], ARGV[1], 'NOCONTENT', 'LIMIT', '0', tostring(#keys), 'DIALECT', '2')
+          if found[1] ~= #found - 1 then return redis.error_reply('Satellite Search result was truncated') end
+          for i = 2, #found do matches[found[i]] = true end
+        end
+      end
       local result = {metadata}
       for _, key in ipairs(keys) do
-        local source = redis.call('JSON.GET', key, '.source')
-        if not source then return redis.error_reply('Redis entity missing from snapshot') end
-        table.insert(result, source)
+        if not matches or matches[key] then
+          local source = redis.call('JSON.GET', key, '.source')
+          if not source then return redis.error_reply('Redis entity missing from snapshot') end
+          table.insert(result, source)
+        end
       end
       return result
-    `, { keys: [`${base}:snapshot:${cohort}`], arguments: [] });
+    `, { keys: [`${base}:snapshot:${cohort}`], arguments: [query, index] });
     const metadata = JSON.parse(result[0]);
     if (token && metadata.token !== token) throw new Error('Projection changed during snapshot read');
+    if (filter) {
+      if (metadata.encoding !== 'tle') throw new Error('Satellite snapshot is not TLE');
+      return Buffer.from(result.slice(1).map(source => JSON.parse(source).text).join(''));
+    }
     let offset = 0;
     const manifest = {...metadata, groups: metadata.groups.map(({path, count}) => ({
       path, ids: Array.from({length: count}, () => String(offset++)),

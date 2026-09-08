@@ -16,10 +16,9 @@ Enabled layer → existing source adapter → Redis Stream → consumer group
 Redis Search → indexes and queries the individual entity JSON documents
 ```
 
-**Current Search scope:** entity documents expose native, indexable fields. Integration tests create an
-`ON JSON` index and run `FT.SEARCH`; you can use Redis CLI or RedisInsight to create and query an index
-following the [Search example](server/redis/README.md#redis-search-readiness). A query panel, automatic index
-creation, and `FT.AGGREGATE` UI are not implemented yet.
+**Current Search scope:** satellites have an automatic `ON JSON` index and an inline Name/Type filter
+that reads through `FT.SEARCH`. Other layers expose indexable entity fields; see the
+[Search examples](server/redis/README.md#redis-search-readiness). `FT.AGGREGATE` UI is not implemented yet.
 
 ## What this fork adds
 
@@ -29,6 +28,7 @@ creation, and `FT.AGGREGATE` UI are not implemented yet.
 | **Streams and consumer groups** | One Stream per layer, projected by the `view-projector` group. Source adapters and their caching remain in use. |
 | **Individual entity documents** | One native RedisJSON document per object, with named fields such as ID, label, location, altitude, and speed, plus nested source data. No giant collection hash of serialized objects. |
 | **Search-ready storage** | Stable entity-key prefixes and native JSON fields support Redis Search indexes and queries. Real Search integration tests verify indexing. |
+| **Satellite filtering** | Redis-only Filter button beneath the satellite toggle opens inline Name/Type fields. Each edit immediately queries Redis Search; Filter off restores the full catalog. TLE names, catalog types, orbital elements, and a dated SGP4 position are exposed as native JSON fields. |
 | **Count-Min Sketch** | One shared sketch per layer counts every projected source record by entity ID, including identical values. Focused labels query the sketch and show an approximate update count. |
 | **Redis-backed view reads** | Ingestion returns a receipt; the browser separately reads a snapshot assembled from Redis entities. Successful map-data responses do not fall back to direct sources. |
 | **Compact snapshots** | Small native JSON metadata and an ordered Redis List of entity keys preserve GEV's response format. Shared membership is inside entity JSON, with no separate owner sets. |
