@@ -71,6 +71,15 @@ export function redisLayersPlugin({pipelineOptions} = {}) {
             }
             return json(res, 200, { ready: true, layers, errors: [...errors.values()] });
           }
+          if (route === '/updates' && req.method === 'GET') {
+            const query = new URL(req.url, 'http://localhost').searchParams;
+            const layer = query.get('layer'), id = query.get('id');
+            if (!Object.hasOwn(paths, layer) || !id || id.length > 512) return json(res, 400, {error: 'Invalid entity reference'});
+            requestLayer = layer;
+            const result = await pipeline.updateCount(layer, id);
+            errors.delete(`${layer}:${route}`);
+            return json(res, 200, result);
+          }
           if (route === '/snapshot' && req.method === 'GET') {
             const query = new URL(req.url, 'http://localhost').searchParams;
             const layer = query.get('layer');

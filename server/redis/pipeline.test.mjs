@@ -67,7 +67,7 @@ test('source routing cannot reach arbitrary hosts, credential files, or control 
   }
 });
 
-test('real Streams → group → entity JSON: content deduplication, deletion, empty snapshots, pending recovery', { timeout: 60000 }, async () => {
+test('real Streams → group → entity JSON: per-update counting, deletion, empty snapshots, pending recovery', { timeout: 60000 }, async () => {
   const prefix = `gev-test:${randomUUID()}`;
   const client = createClient({ url: process.env.REDIS_URL || 'redis://127.0.0.1:6379' });
   client.on('error', () => {});
@@ -100,9 +100,12 @@ test('real Streams → group → entity JSON: content deduplication, deletion, e
     }
     assert.equal(found[0], 1, 'Search indexes named numeric fields on individual JSON entities');
     await project(first);
-    assert.deepEqual(await client.sendCommand(['CMS.QUERY', `${prefix}:test:frequency`, 'a', 'b']), [1, 1]);
+    assert.deepEqual(await client.sendCommand(['CMS.QUERY', `${prefix}:test:frequency`, 'a', 'b']), [2, 3]);
+    const beforeQuery = (await pipeline.stats()).test.entriesAdded;
+    assert.deepEqual(await pipeline.updateCount('test', 'a'), {layer: 'test', id: 'a', count: 2, approximate: true});
+    assert.equal((await pipeline.stats()).test.entriesAdded, beforeQuery, 'CMS lookup is read-only');
     assert.deepEqual(JSON.parse(await project([{ id: 'a', lat: 3 }])), { rows: [{ id: 'a', lat: 3 }] });
-    assert.deepEqual(await client.sendCommand(['CMS.QUERY', `${prefix}:test:frequency`, 'a', 'b']), [2, 1]);
+    assert.deepEqual(await client.sendCommand(['CMS.QUERY', `${prefix}:test:frequency`, 'a', 'b']), [3, 3]);
     assert.equal(await client.exists(`${prefix}:test:entity:rows:b`), 1, 'other snapshot still references b');
     assert.deepEqual(JSON.parse(await pipeline.snapshot('test', 'overlap')), {rows: [{id: 'b', lat: 2}]});
     await pipeline.project('test', 'overlap', pack([]));

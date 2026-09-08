@@ -64,11 +64,7 @@ for _, event in ipairs(events) do
       local oldMembers = redis.call('LRANGE', members, 0, -1)
       redis.call('DEL', members)
       for i, record in ipairs(items) do
-        local previous = redis.call('JSON.GET', record.key, '.fingerprint')
-        local doc = cjson.decode(documents[i])
-        if not previous or cjson.decode(previous) ~= doc.fingerprint then
-          redis.call('CMS.INCRBY', KEYS[3], record.item, 1)
-        end
+        redis.call('CMS.INCRBY', KEYS[3], record.item, 1)
         local collections = memberships(record.key, m.cohort, true)
         -- Preserve the original JSON serialization (notably empty arrays).
         redis.call('JSON.SET', record.key, '$', documents[i])
@@ -352,6 +348,13 @@ export class RedisPipeline {
       path, ids: Array.from({length: count}, () => String(offset++)),
     }))};
     return unpackBody(manifest, Object.fromEntries(result.slice(1).map((source, i) => [String(i), source])));
+  }
+
+  /** Read-only estimate; never creates a sketch or ingests a source. */
+  async updateCount(layer, id) {
+    const client = await this.connect();
+    const [count] = await client.sendCommand(['CMS.QUERY', this.keys(layer).cms, id]);
+    return {layer, id, count, approximate: true};
   }
 
   async stats() {

@@ -29,7 +29,7 @@ creation, and `FT.AGGREGATE` UI are not implemented yet.
 | **Streams and consumer groups** | One Stream per layer, projected by the `view-projector` group. Source adapters and their caching remain in use. |
 | **Individual entity documents** | One native RedisJSON document per object, with named fields such as ID, label, location, altitude, and speed, plus nested source data. No giant collection hash of serialized objects. |
 | **Search-ready storage** | Stable entity-key prefixes and native JSON fields support Redis Search indexes and queries. Real Search integration tests verify indexing. |
-| **Count-Min Sketch** | One shared sketch per layer counts changed source records by entity ID; identical records do not increment it. |
+| **Count-Min Sketch** | One shared sketch per layer counts every projected source record by entity ID, including identical values. Focused labels query the sketch and show an approximate update count. |
 | **Redis-backed view reads** | Ingestion returns a receipt; the browser separately reads a snapshot assembled from Redis entities. Successful map-data responses do not fall back to direct sources. |
 | **Compact snapshots** | Small native JSON metadata and an ordered Redis List of entity keys preserve GEV's response format. Shared membership is inside entity JSON, with no separate owner sets. |
 | **Stream statistics** | Layer text uses `XINFO STREAM` lifetime `entries-added` and `last-generated-id`, with pending/lag details and exact values on hover. |

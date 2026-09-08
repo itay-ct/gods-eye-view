@@ -998,6 +998,7 @@ export function createBikeshareSelectedOverlayEntry(key, record) {
   const [title, ...details] = buildSelectionLabel(record).split('\n');
   return {
     id: String(key),
+    metadata: {redisLayer: 'bikeshare', redisId: record.stationId},
     position,
     variant: 'selected',
     selected: true,

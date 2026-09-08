@@ -1,3 +1,4 @@
+import { installRedisFocusCounts } from './data/redisFocusCounts.js';
 import { installRedisMode } from './data/redisMode.js';
 import * as Cesium from 'cesium';
 import { StyleManager } from './ui.js';
@@ -238,6 +239,7 @@ async function init() {
       };
     }
     installRedisMode(dataManager);
+    installRedisFocusCounts(dataManager);
     dataManager.buildTogglePanel(document.getElementById('data-toggles'));
     styleManager.attachDataManager(dataManager);
 

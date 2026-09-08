@@ -39,7 +39,7 @@ video/images, radio audio, terrain helpers, and user presentation settings retai
 | `gev:<layer>:snapshot:<cohort>` | Small native JSON: source URL, response envelope, group counts, total count and generation token |
 | `gev:<layer>:snapshot:<cohort>:members` | Redis List of entity keys, once each, in source order |
 | `gev:<layer>:stream` | Source record events and snapshot commit events |
-| `gev:<layer>:frequency` | Shared Count-Min Sketch counting changed source record IDs |
+| `gev:<layer>:frequency` | Shared Count-Min Sketch counting every projected source record ID |
 | `gev:<layer>:staging:<generation>:<id>` | Temporary individual JSON document, outside entity index prefixes |
 
 JSON preserves nested GeoJSON, source arrays and native numeric/boolean/null types. Documents expose named
@@ -94,8 +94,8 @@ The main line is **“12,345 events · 3s ago”**. Idle, disabled layers have n
 - Pending/lag appears only when work is outstanding. Original source errors/fallback state remain visible.
 - The count beside each layer name remains GEV's current rendered-object count.
 
-CMS increments for changed source records, not only position changes. Identical snapshots and completed-commit
-retries do not increment it. Counters persist across toggles/restarts; approximation is inherent to CMS.
+CMS increments for every object record applied by a snapshot commit, including identical source values.
+Redelivery of the completed commit does not increment it again. Counters persist across toggles/restarts; approximation is inherent to CMS.
 The obsolete collection hashes and metrics hashes have been removed. Stream history and sketches are retained;
 schema 3 migrates old `:view:` manifests to compact metadata plus Lists and moves ownership into entity JSON.
 It preserves entity values, Stream history, CMS counts, and pending schema-2 events.
@@ -114,7 +114,7 @@ node --test src/data/redisMode.test.mjs src/data/manager.test.mjs
 npm run build
 ```
 
-Tests cover payload fidelity, individual JSON keys, Search indexing, duplicate counting, removals, empty
+Tests cover payload fidelity, individual JSON keys, Search indexing, per-update counting, removals, empty
 snapshots, pending recovery, repeated commits, overlapping/expired memberships, schema migration, Redis edit/readback without ingestion, and XINFO totals after trimming.
 
 A small warning beneath the Redis toggle reports connection, consumer, ingestion, or snapshot-read failures and clears when the affected operation succeeds again.
@@ -147,3 +147,15 @@ remain until their normal expiry/retention, so keys remaining in Redis do not im
 Compare `XINFO STREAM` → `entries-added` / `last-generated-id` to verify intake stopped. Status checks can
 repair empty infrastructure keys without ingesting entities. Redis is shared: another tab with the layer ON
 can still ingest into the same Stream. Requests from different tabs have independent cancellation.
+
+## Focused-object update counts
+
+In Redis mode, focused/tracked map labels show **“≈ 123 updates”**, refreshed every two seconds while the
+layer is enabled. The browser uses read-only `GET /api/redis/updates?layer=<layer>&id=<source-id>`, which runs
+`CMS.QUERY gev:<layer>:frequency <source-id>`. Callsigns and display names are not sketch keys. Counts are
+approximate; unavailable Redis is shown as unavailable, not zero. No Redis mode makes no count queries.
+
+The consumer increments `CMS.INCRBY` for every entity applied by a completed projection, even if its source
+values are unchanged. Re-delivering the completed commit does not count twice. Cancelled partial snapshots
+that never commit do not count as projected updates. Existing sketches retain their previous counts; the new
+per-update semantics apply from this change onward. Flush Redis for a fresh demo count.

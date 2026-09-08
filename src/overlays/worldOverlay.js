@@ -24,6 +24,8 @@ import { WORLD_OVERLAY_STYLE } from './worldOverlayTokens.js';
  * generation; this host owns projection, final placement, paint, and hits.
  */
 
+const supplementalDetails = new Map();
+
 const ROOT_ID = 'world-overlay-root';
 const CANVAS_ID = 'world-overlay-canvas';
 const DETECTION_SURFACE_ID = 'world-overlay-detection-surface';
@@ -411,6 +413,7 @@ export function normalizeOverlayEntry(sourceId, entry) {
   if (!VALID_VARIANTS.has(variant)) {
     throw new TypeError(`Unsupported WorldOverlay variant: ${variant}`);
   }
+  const extra = supplementalDetails.size ? supplementalDetails.get(entryKey(source, id)) : null;
   const normalized = {
     id,
     source,
@@ -542,6 +545,7 @@ export function normalizeOverlayEntry(sourceId, entry) {
     ? normalized.image
     : null;
   normalized._overlayLayout = {};
+  if (extra) normalized.details.push(extra);
   return normalized;
 }
 
@@ -789,6 +793,34 @@ export function registerWorldOverlayPaintLane(laneId, painter, options = {}) {
     },
     unregister,
   };
+}
+
+/** Inspect focused entries at data-refresh cadence, outside the render loop. */
+export function getFocusedOverlayEntries(context = null) {
+  if (_destroyed) return [];
+  const entries = [];
+  for (const source of _sourceList) {
+    if (source.options.visible === false) continue;
+    for (const entry of source.entries.values()) {
+      if (entry.selected || entry.tracked || (context?.source === source.id && context.id === entry.id)) entries.push(entry);
+    }
+  }
+  return entries;
+}
+
+/** Add a changing detail without modifying the layer's own presentation model. */
+export function setOverlaySupplementalDetail(sourceId, id, text = '') {
+  if (_destroyed) return;
+  const key = entryKey(sourceId, id);
+  const previous = supplementalDetails.get(key);
+  if (previous === text || (!previous && !text)) return;
+  if (text) supplementalDetails.set(key, text); else supplementalDetails.delete(key);
+  const entry = _sources.get(sourceId)?.entries.get(id);
+  if (entry) {
+    const details = previous && entry.details.at(-1) === previous ? entry.details.slice(0, -1) : entry.details;
+    entry.details = text ? [...details, text] : details;
+    invalidateHost();
+  }
 }
 
 /**
@@ -2261,6 +2293,7 @@ export function destroyWorldOverlay() {
   if (typeof window !== 'undefined' && window.__gevWorldOverlay?.getDiagnostics === getWorldOverlayDiagnostics) {
     delete window.__gevWorldOverlay;
   }
+  supplementalDetails.clear();
   _sources.clear();
   _sourceList.length = 0;
   for (let i = 0; i < _customPaintLaneList.length; i++) {
