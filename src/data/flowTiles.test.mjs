@@ -160,3 +160,24 @@ test('fetchFlowForBounds: non-OK tile responses reject when nothing succeeds', a
     restore();
   }
 });
+
+test('large traffic views limit concurrent tile loads and cancellation stops queued work', async () => {
+  const original=globalThis.fetch;
+  const bounds={south:51.3,north:51.7,west:-0.4,east:0.2};
+  const controller=new AbortController();
+  let active=0, peak=0, calls=0;
+  resetFlowTileCache();
+  globalThis.fetch=async()=>{
+    calls++;active++;peak=Math.max(peak,active);
+    await new Promise(resolve=>setTimeout(resolve,2));active--;
+    return new Response(new Uint8Array());
+  };
+  try {
+    await fetchFlowForBounds(bounds);
+    assert.ok(calls>4);assert.equal(peak,4);
+    resetFlowTileCache();calls=0;
+    globalThis.fetch=async()=>{calls++;controller.abort();throw controller.signal.reason;};
+    await assert.rejects(fetchFlowForBounds(bounds,{signal:controller.signal}),{name:'AbortError'});
+    assert.ok(calls<=4,'queued tiles must not start after the layer is cancelled');
+  } finally {globalThis.fetch=original;resetFlowTileCache();}
+});

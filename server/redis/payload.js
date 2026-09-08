@@ -1,3 +1,4 @@
+import {radioCategories} from '../../src/data/radioTags.js';
 import { createHash } from 'node:crypto';
 import { satelliteSourceGroup } from '../../src/data/satelliteClass.js';
 import { satelliteFields } from './satellite.js';
@@ -101,6 +102,7 @@ export function entityDocument(layer, cohort, record) {
     latitude, longitude, altitudeM, speedMps,
     location: latitude !== null && longitude !== null && Math.abs(latitude) <= 90 && Math.abs(longitude) <= 180 ? `${longitude},${latitude}` : null,
     fingerprint: digest(record.data), source,
+    ...(layer === 'radio' && record.kind === 'stations' ? {categories:radioCategories(source)} : {}),
     ...(isState ? record.enrichment : {}),
     ...(layer === 'satellites' && source.text ? satelliteFields(source.text, record.satelliteGroup) : {}) };
 }

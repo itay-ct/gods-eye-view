@@ -1,16 +1,46 @@
-import { createRedisLayerFilter, aisFilter, aisFilterOpen, datacenterFilter, datacenterFilterOpen, satelliteFilter, satelliteFilterOpen, flightFilter, flightFilterOpen, refreshFlightFilterOptions } from './redisSatelliteFilter.js';
+import {readWhileIngesting} from './redisProgressive.js';
+import { militaryFilter, resetRedisFilter, createRedisLayerFilter, aisFilter, aisFilterOpen, datacenterFilter, datacenterFilterOpen, satelliteFilter, satelliteFilterOpen, flightFilter, flightFilterOpen, refreshFlightFilterOptions } from './redisSatelliteFilter.js';
 
 let layerManager = null;
 const layerRequests = new Map();
 const viewReceipts = new Map();
-const readOnly = {satellites: 0, flights: 0, 'local-datacenters':0, 'ais-live-vessels':0};
+const readOnly = {military:0, satellites: 0, flights: 0, 'local-datacenters':0, 'ais-live-vessels':0};
 const viewRequests = new Map();
+const progressRefreshes = new Map();
+function queueProgressRefresh(layer) {
+  const previous = progressRefreshes.get(layer);
+  if (previous) {previous.again = true; return;}
+  const state = {again:false};
+  state.timer = setTimeout(async () => {
+    if (progressRefreshes.get(layer) !== state) return;
+    if (!layerManager?.isEffectivelyEnabled(layer)) {progressRefreshes.delete(layer); return;}
+    const entry = layerManager.layers.get(layer);
+    if (entry.lifecycleState !== 'enabled') {progressRefreshes.delete(layer); queueProgressRefresh(layer); return;}
+    readOnly[layer] = (readOnly[layer] || 0) + 1;
+    try {await layerManager.refreshLayer(layer, {signal:layerSignal(layer)});}
+    catch (error) {
+      if (error.name !== 'AbortError') layerManager._redisRequestErrors = [...(layerManager._redisRequestErrors || []), error.message];
+    }
+    finally {
+      readOnly[layer]--;
+      if (progressRefreshes.get(layer) === state) {
+        progressRefreshes.delete(layer);
+        if (state.again && layerManager?.isEffectivelyEnabled(layer)) queueProgressRefresh(layer);
+      }
+    }
+  }, 250);
+  progressRefreshes.set(layer, state);
+}
+export const redisLayerViewReadOnly = layer => redisEnabled() && readOnly[layer] > 0;
 export const redisFlightViewReadOnly = () => redisEnabled() && readOnly.flights > 0;
 export const redisSatelliteFilterActive = () => redisEnabled() && satelliteFilter() !== null;
 
 function cancelLayerRequests(layer) {
   layerRequests.get(layer)?.abort(new DOMException('Redis layer is off', 'AbortError'));
   layerRequests.delete(layer);
+  clearTimeout(progressRefreshes.get(layer)?.timer); progressRefreshes.delete(layer);
+  resetRedisFilter(layer);
+  layerManager?.layers?.get(layer)?.module?.resetRedisFilter?.();
 }
 
 function layerSignal(layer, signal) {
@@ -40,13 +70,17 @@ export function installRedisMode(manager) {
   };
   manager.formatLayerMeta = (layer, original) => redisMeta(manager, layer, original);
   manager.extendLayerRow = (layer, row) => {
-    if (!['satellites', 'flights', 'local-datacenters', 'ais-live-vessels'].includes(layer.id) || !redisEnabled()) return;
+    if (layer.id === 'radio' && redisEnabled()) {
+      manager.layers.get('radio')?.module?.createRedisFilter?.(row, () => manager._refreshTogglePanel());
+      return;
+    }
+    if (!['satellites', 'flights', 'military', 'local-datacenters', 'ais-live-vessels'].includes(layer.id) || !redisEnabled()) return;
     createRedisLayerFilter(row, {
       layerId: layer.id,
       enabled: () => manager.isEffectivelyEnabled(layer.id),
-      loadTypes: ['flights','local-datacenters'].includes(layer.id) ? async (label) => {
+      loadTypes: ['flights','military','local-datacenters'].includes(layer.id) ? async (label) => {
         const signal = layerSignal(layer.id, AbortSignal.timeout(5000));
-        const response = await fetch((layer.id === 'flights' ? '/api/redis/flight-types?' : '/api/redis/datacenter-operators?') + new URLSearchParams(layer.id === 'flights' ? {label} : {name:label}), {signal, cache: 'no-store'});
+        const response = await fetch((layer.id === 'military' ? '/api/redis/military-types?' : layer.id === 'flights' ? '/api/redis/flight-types?' : '/api/redis/datacenter-operators?') + new URLSearchParams(['flights','military'].includes(layer.id) ? {label} : {name:label}), {signal, cache: 'no-store'});
         if (!response.ok) throw new Error(layer.id === 'flights' ? 'Flight types unavailable' : 'Datacenter operators unavailable');
         return response.json();
       } : null,
@@ -81,18 +115,32 @@ export function layerFetch(layer) {
     // A radio listener click is a provider interaction, not a map-data update.
     if (layer === 'radio' && url.pathname.startsWith('/api/radio/click/')) return globalThis.fetch(input, init);
     const source = url.origin === globalThis.location.origin ? url.pathname + url.search : url.href;
-    const isView = (layer === 'ais-live-vessels' && url.pathname === '/api/ais-live') || layer === 'local-datacenters' || layer === 'satellites' || (layer === 'flights' && url.pathname === '/api/opensky');
+    const viewKey = init.method === 'POST' ? `${source}\n${init.body || ''}` : source;
+    const isView = layer === 'earthquakes' || layer === 'local-dams' || layer === 'local-firms' || layer === 'telegeography-submarine-cables' || (layer === 'rocket-launches' && url.pathname === '/api/launches') || (layer === 'bikeshare' && url.pathname === '/api/gbfs') || (layer === 'military-installations' && url.pathname === '/api/military-installations') || (layer === 'cctv' && url.pathname === '/api/cctv/sources') || (layer === 'traffic' && url.pathname === '/api/overpass') || (layer === 'military' && url.pathname === '/api/adsblol/mil') || (layer === 'radio' && url.pathname === '/api/radio/stations') || (layer === 'ais-live-vessels' && url.pathname === '/api/ais-live') || layer === 'local-datacenters' || layer === 'satellites' || (layer === 'flights' && url.pathname === '/api/opensky');
     if (isView) {
       if (!viewRequests.has(layer)) viewRequests.set(layer, new AbortController());
       signal = AbortSignal.any([signal, viewRequests.get(layer).signal]);
     }
-    const filter = isView && !init.redisUnfiltered ? (layer === 'ais-live-vessels' ? aisFilter() : layer === 'flights' ? flightFilter() : layer === 'local-datacenters' ? datacenterFilter() : satelliteFilter()) : null;
-    if (isView && (readOnly[layer] || init.redisReadOnly) && viewReceipts.has(source)) {
-      const response = await readProjection(Response.json(viewReceipts.get(source)), signal, filter);
+    const filter = init.redisFilter ?? (isView && !init.redisUnfiltered ? (layer === 'military' ? militaryFilter() : layer === 'ais-live-vessels' ? aisFilter() : layer === 'flights' ? flightFilter() : layer === 'local-datacenters' ? datacenterFilter() : layer === 'satellites' ? satelliteFilter() : null) : null);
+    if (isView && (readOnly[layer] || init.redisReadOnly) && viewReceipts.has(viewKey)) {
+      const response = await readProjection(Response.json(viewReceipts.get(viewKey)), signal, filter);
       if (response.status !== 503) return response;
       const failure = await response.clone().json().catch(() => ({}));
       if (!/Redis snapshot not found|Redis snapshot membership incomplete|Redis entity missing from snapshot/.test(failure.error || '')) return response;
       // Snapshot expiration/FLUSHDB: repopulate through the Stream before retrying.
+    }
+    if (isView) {
+      return readWhileIngesting(`${layer}:${viewKey}`, {
+        signal, lifetime:layerSignal(layer),
+        start: lifetime => globalThis.fetch('/api/redis/ingest', {
+          method:'POST', headers:{'Content-Type':'application/json'}, signal:lifetime, cache:'no-store',
+          body:JSON.stringify({layer,url:source,method:init.method || 'GET',body:init.body,progressive:true}),
+        }),
+        read: (receipt, signal) => readProjection(Response.json(receipt), signal, filter),
+        onReceipt: receipt => viewReceipts.set(viewKey, receipt),
+        onProgress: () => queueProgressRefresh(layer),
+        onError: error => {if (layerManager) layerManager._redisRequestErrors=[...(layerManager._redisRequestErrors || []),error.message];},
+      });
     }
     const ingest = () => globalThis.fetch('/api/redis/ingest', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -101,7 +149,7 @@ export function layerFetch(layer) {
       cache: 'no-store',
     });
     return ingestAndRead(ingest, signal, filter, isView
-      ? receipt => viewReceipts.set(source, receipt) : null);
+      ? receipt => viewReceipts.set(viewKey, receipt) : null);
   };
 }
 
@@ -129,10 +177,11 @@ async function readProjection(receipt, signal, filter = null, onReceipt = null) 
   onReceipt?.({snapshotUrl, headers});
   const query = filter ? `&${new URLSearchParams({filter: '1', ...filter})}` : '';
   const response = await globalThis.fetch(snapshotUrl + query, { signal, cache: 'no-store' });
-  if (!response.ok) return response;
+  if (!response.ok || response.status === 202) return response;
   if (response.headers.get('x-gev-data-path') !== 'redis-json') throw new Error('Response was not read from Redis entities');
   return new Response(await response.arrayBuffer(), { status: response.status,
     headers: { ...headers, 'x-gev-data-path': 'redis-json',
+      ...(response.headers.get('x-gev-progressive') === '1' ? {'x-gev-progressive':'1'} : {}),
       ...(response.headers.get('x-gev-filtered') === '1' ? {'x-gev-filtered': '1'} : {}) } });
 }
 
@@ -163,9 +212,10 @@ export function createRedisControl(manager) {
   note.className = 'redis-mode-note';
   note.setAttribute('role', 'status');
   note.textContent = redisEnabled() ? 'Redis entities' : 'Original GEV';
-  const warning = document.createElement('span');
+  const warning = document.createElement('button');
+  warning.type = 'button';
   warning.className = 'redis-mode-warning';
-  warning.setAttribute('role', 'status');
+  warning.setAttribute('aria-label', 'Retry Redis and enabled layers');
   warning.setAttribute('aria-live', 'polite');
   warning.hidden = true;
   button.addEventListener('click', async () => {
@@ -173,7 +223,7 @@ export function createRedisControl(manager) {
     try {
       if (!redisEnabled()) {
         note.textContent = 'Connecting…';
-        const response = await fetch('/api/redis/status', { signal: AbortSignal.timeout(4000) });
+        const response = await fetch('/api/redis/status', { signal: AbortSignal.timeout(10000) });
         if (!response.ok) throw new Error('Redis unavailable · start local Redis');
       }
       for (const layer of layerRequests.keys()) cancelLayerRequests(layer);
@@ -186,27 +236,32 @@ export function createRedisControl(manager) {
       button.disabled = false;
     }
   });
+  warning.addEventListener('click', async () => {
+    if(manager._redisRetrying) return;
+    manager._redisRetrying=true;warning.disabled=true;warning.textContent='Retrying…';
+    try {
+      await retryRedisLayers(manager);
+    } catch(error) {manager._redisError=error.message;}
+    finally {
+      manager._redisRetrying=false;warning.disabled=false;
+      const message=redisWarning(manager);warning.textContent=message ? `⚠ ${message} · Retry` : '';warning.hidden=!message;
+    }
+  });
   root.append(button, note, warning);
   if (redisEnabled() && !manager._redisStatsTimer) {
     const poll = async () => {
-      if (document.hidden || manager._redisStatsLoading) return;
+      if (document.hidden || manager._redisStatsLoading || manager._redisRetrying) return;
       manager._redisStatsLoading = true;
       try {
-        const response = await fetch('/api/redis/status', { signal: AbortSignal.timeout(4000) });
+        const response = await fetch('/api/redis/status', { signal: AbortSignal.timeout(10000) });
         if (!response.ok) throw new Error('Redis unavailable');
         const status = await response.json();
-        if (!manager._redisReloading && (redisResetDetected(manager._redisEpochs, status.layers)
-          || (manager._redisError && !Object.values(status.layers).some(stats => stats.error)))) {
+        if (updateRedisStatus(manager, status) && !manager._redisReloading) {
           manager._redisReloading = true;
-          note.textContent = 'Redis recovered · reloading layers…';
+          note.textContent = 'Redis was reset · reloading layers…';
           location.reload();
           return;
         }
-        manager._redisEpochs = {...manager._redisEpochs, ...Object.fromEntries(
-          Object.entries(status.layers).filter(([, stats]) => stats.epoch))};
-        manager._redisStats = status.layers;
-        manager._redisRequestErrors = status.errors || [];
-        manager._redisError = null;
       } catch { manager._redisError = 'Redis unavailable'; }
       finally {
         manager._redisStatsLoading = false;
@@ -215,7 +270,7 @@ export function createRedisControl(manager) {
         const currentWarning = manager._toggleContainer?.querySelector('.redis-mode-warning');
         if (currentWarning) {
           const message = redisWarning(manager);
-          currentWarning.textContent = message ? `⚠ ${message}` : '';
+          currentWarning.textContent = message ? `⚠ ${message} · Retry` : '';
           currentWarning.title = message;
           currentWarning.hidden = !message;
         }
@@ -229,6 +284,36 @@ export function createRedisControl(manager) {
     void poll();
   }
   return root;
+}
+
+/** Retry health plus active feeds without changing layer intent or reloading the page. */
+export async function retryRedisLayers(manager) {
+  const layers=manager.getAll().filter(layer=>manager.isEffectivelyEnabled(layer.id)).map(layer=>layer.id);
+  const response=await fetch('/api/redis/retry',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({layers}),signal:AbortSignal.timeout(15000)});
+  if(!response.ok) throw new Error('Redis retry failed');
+  const failures=[];
+  for(const id of layers) {
+    if(!manager.isEffectivelyEnabled(id)) continue;
+    try {if(!await manager.refreshLayer(id)) failures.push(`${id}: retry did not complete`);}
+    catch(error){failures.push(`${id}: ${error.message}`);}
+  }
+  const health=await fetch('/api/redis/status',{signal:AbortSignal.timeout(10000)});
+  if(!health.ok) throw new Error('Redis remains unavailable');
+  updateRedisStatus(manager,await health.json());
+  manager._redisRequestErrors=[...(manager._redisRequestErrors || []),...failures];
+  manager._refreshTogglePanel();
+}
+
+/** A slow health request is not a database reset. Preserve the view on recovery. */
+export function updateRedisStatus(manager, status) {
+  const reset = redisResetDetected(manager._redisEpochs, status.layers);
+  manager._redisEpochs = {...manager._redisEpochs, ...Object.fromEntries(
+    Object.entries(status.layers).filter(([, stats]) => stats.epoch))};
+  manager._redisStats = status.layers;
+  manager._redisRequestErrors = status.errors || [];
+  manager._redisError = null;
+  return reset;
 }
 
 export function redisWarning(manager) {

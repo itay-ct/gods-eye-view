@@ -16,12 +16,12 @@ docker run -d --name gev-redis -p 127.0.0.1:6379:6379 \
 
 For the existing container: `docker start gev-redis` / `docker stop gev-redis`.
 Optional server overrides: `REDIS_URL` (default `redis://127.0.0.1:6379`) and
-`REDIS_STREAM_MAXLEN` (default `10000`).
+`REDIS_STREAM_MAXLEN` (default `10000` for other layers). Flights and Live AIS use a `100000`-entry target.
 
 ## Entity storage and reads
 
 1. `POST /api/redis/ingest` reuses the original source adapter and publishes records to its layer Stream.
-2. The `view-projector` consumer stages individual JSON documents, then atomically publishes them with compact snapshot metadata and an ordered Redis List of entity keys.
+2. The `view-projector` consumer stages individual JSON documents, publishes them in bounded batches, then commits compact snapshot metadata and an ordered Redis List of entity keys.
 3. Ingestion returns a snapshot URL, **no source records**.
 4. The browser calls `GET /api/redis/snapshot`. This endpoint reads individual RedisJSON entities; it cannot fetch
    upstream data, ingest, or fall back to a direct source. Missing Redis entities produce an explicit failure.
@@ -41,6 +41,8 @@ video/images, radio audio, terrain helpers, and user presentation settings retai
 | `gev:<layer>:stream` | Source record events and snapshot commit events |
 | `gev:<layer>:frequency` | Shared Count-Min Sketch counting every projected source record ID |
 | `gev:<layer>:staging:<generation>:<id>` | Temporary individual JSON document, outside entity index prefixes |
+| `gev:<layer>:staging:<generation>:commit*` | Temporary publication cursor, next member List and membership Set; removed after completion |
+| `gev:<layer>:publishing` / `:revision` | Publication guard and revision used to prevent mixed-generation UI reads |
 
 JSON preserves nested GeoJSON, source arrays and native numeric/boolean/null types. Documents expose named
 `id`, `layer`, `kind`, `label`, `latitude`, `longitude`, `location` (lon,lat), `altitudeM`, and `speedMps` fields,
@@ -113,6 +115,18 @@ without ingesting again; normal AIS polling continues through Streams. Filtered-
 selected vessels and their trails are removed immediately, including zero matches.
 Turning Filter off restores the snapshot; AIS track requests remain unfiltered.
 
+### Radio stations
+
+With Redis and Radio ON, **Filter** shows inline **Name** and **Tag** controls. Name uses word-prefix
+`FT.SEARCH`; Tag queries the entity's indexed `categories` array. These categories use the original radio
+classification rules, including music genres. `gev:radio:idx` indexes `label` as TEXT and `categories` as TAG.
+Existing entities gain categories on their next directory ingestion.
+
+The Tag dropdown and existing radio panel share one selection and update each other. Counts retain the
+panel's full-catalogue category totals. Search matches restrict map markers, clusters, and the tuner list;
+the underlying full catalogue stays intact. Filter edits read Redis without ingesting again. Turning Filter
+off removes the name restriction while preserving the existing tag. Controls are hidden when the layer is OFF.
+
 ### Datacenters
 
 With Redis and Datacenters ON, **Filter** shows inline **Name** and **Operator** controls.
@@ -145,7 +159,7 @@ or All types. Words and fields combine with AND; an empty name is unrestricted.
 Types use the same catalog classification as the map: STATION, NAV · GPS/GLONASS/GALILEO, GEO, VISUAL,
 and COMMS · STARLINK (enable DENSE for Starlink). This is a catalog category, not a payload/mission type inferred
 from TLE. Existing DENSE controls remain available; the class-count legend is replaced by the filter form.
-Toggle Filter off to restore the full catalog. Filters are local to the current page and clear on reload.
+Toggle Filter off to restore the full catalog. Filters clear and close when the layer is switched OFF, and on reload. Radio also resets its shared tag to All.
 
 Each input change re-reads cached snapshot references using `FT.SEARCH`, scoped to each source collection. It does not
 increment the Stream or CMS. An expired/missing snapshot is re-ingested through the normal Stream path.
@@ -161,15 +175,14 @@ They are not live measurements. The browser still propagates the retained `sourc
 On the next normal ingestion, existing satellite documents gain these fields through the Stream projector.
 Overlapping catalog groups follow GEV's priority rather than last-arrival order.
 
-Other layers remain ready for indexes. For example, a military-aircraft index can use:
+Military flights automatically create `gev:military:idx` on `gev:military:entity:ac:` documents.
+The inline **Label / Type** filter works while Redis and the layer are ON. Label uses word-prefix
+`FT.SEARCH`; Type is an exact match on the provider's `source.t` aircraft designator (such as C17),
+indexed as `typeName` / `typeNameExact`. `FT.AGGREGATE` ranks the top 20 known types by count among
+flights matching the label. Filtering only re-reads Redis; it does not add Stream events or CMS counts.
 
 ```text
-FT.CREATE gev:military:idx ON JSON PREFIX 1 gev:military:entity: SCHEMA
-  $.id AS id TAG
-  $.label AS label TEXT
-  $.location AS location GEO
-  $.altitudeM AS altitudeM NUMERIC
-  $.source.gs AS groundSpeedKnots NUMERIC
+FT.SEARCH gev:military:idx '@kind:{ac} @label:(RCH*) @typeNameExact:{C17}' LIMIT 0 100
 ```
 
 ## Layer statistics
@@ -191,14 +204,34 @@ It preserves entity values, Stream history, CMS counts, and pending schema-2 eve
 
 ## Stream settings and checks
 
-`MAXLEN ~ 10000 ACKED` trims acknowledged events only. One stable `local-view` consumer per layer uses
-`COUNT 200`, `BLOCK 1000`, and a dedicated blocking connection. Restart drains its pending entries first.
-The consumer also trims exactly to 10,000 after acknowledging each batch. Unacknowledged events are protected, so retention can temporarily exceed the target. Large snapshots remain valid because earlier entries are staged before trimming. Intake pauses above twice the retention target; `noeviction` makes memory pressure visible. Keep one projector
+`MAXLEN ~ 100000 ACKED` applies to Flights and Live AIS; other layers use `MAXLEN ~ 10000 ACKED` by default. Both trim acknowledged events only. One stable `local-view` consumer per layer uses
+`COUNT 200`, `BLOCK 1000`, and a dedicated blocking connection. Each read is processed by scripts of at most
+25 records; commits also publish and remove memberships in batches of 25. Restart drains pending entries
+and resumes a durable commit cursor. Each batch's entity writes, CMS increments, and cursor advance are atomic,
+so replay does not count the batch twice. Entity enrichment is assembled on unindexed staging keys before one
+indexed JSON write per entity. Scripts use cached `EVALSHA`, with automatic reload after `SCRIPT FLUSH`.
+
+Ingestion pipelines up to 100 `XADD` commands. Snapshot reads pipeline up to 100 `JSON.GET` commands, and
+`FT.SEARCH` runs outside Lua. The default snapshot API verifies the layer revision before and after
+fetching and retries overlapping publication. Metadata/member-list publication and the final Stream
+acknowledgement happen together.
+
+The browser opts into progressive reads. HTTP ingestion immediately returns a receipt over an NDJSON
+control stream, then reports progress/completion while the upstream fetch and projection continue.
+The browser reads cached Redis JSON immediately and refreshes it as batches finish; a cold snapshot
+returns HTTP 202 until its first batch exists. Each document is written atomically, but a progressive
+view may combine new batches and previous cached objects until final publication removes stale members.
+Map data always comes from the Redis snapshot endpoint, never from the control stream or provider.
+Layer OFF aborts ingestion and pending reads. Snapshot reads remain pipelined in bounded batches.
+
+The consumer also trims to the layer’s target (100,000 or 10,000) after each read batch and completed commit. Unacknowledged events are protected, so retention can temporarily exceed the target. Large snapshots remain valid because earlier entries are staged before trimming. Intake pauses above twice the retention target; `noeviction` makes memory pressure visible. Keep one projector
 process for this MVP. Before adding workers, add ordering/ownership rules and abandoned-consumer claiming.
-Polling is retained; Pub/Sub/SSE invalidations can be added later with snapshot recovery after reconnect.
+Source polling is retained. The ingestion control stream triggers coalesced Redis view refreshes; it does not use Redis Pub/Sub or browser SSE.
 
 ```sh
 node --test server/redis/pipeline.test.mjs
+node --test server/redis/projectionBatches.test.mjs
+node --test --test-concurrency=1 server/redis/*.test.mjs
 node --test src/data/redisMode.test.mjs src/data/manager.test.mjs
 npm run build
 ```
@@ -206,7 +239,56 @@ npm run build
 Tests cover payload fidelity, individual JSON keys, Search indexing, per-update counting, removals, empty
 snapshots, pending recovery, repeated commits, overlapping/expired memberships, schema migration, Redis edit/readback without ingestion, and XINFO totals after trimming.
 
-A small warning beneath the Redis toggle reports connection, consumer, ingestion, or snapshot-read failures and clears when the affected operation succeeds again.
+For a repeatable load check, use a disposable Redis instance:
+
+```sh
+REDIS_URL=redis://127.0.0.1:16379 node scripts/redis-load-check.mjs
+```
+
+It ingests 10,000 flights and 12,500 AIS vessels concurrently for three rounds, checks Search results and
+Stream retention, and measures a separate client's PING latency. Synthetic keys and indexes are removed afterward.
+
+A small warning beneath the Redis toggle reports connection, consumer, ingestion, or snapshot-read failures.
+Source fetch failures include the layer and endpoint, so an upstream timeout is not reported as a Redis crash.
+Click the warning to check Redis, repair enabled layer infrastructure, and refresh enabled layers sequentially.
+The warning clears after successful recovery; continuing failures remain visible. Retry preserves layer toggles
+and the current map view. It does not erase stored data.
+
+Live AIS allows 75 seconds for the complete Redis ingestion/projection/read path; No Redis retains the original
+10-second request limit. Health checks allow 10 seconds so a busy projector is less likely to cause a false
+connection warning. Upstream source requests remain bounded at 35 seconds, independently of Redis processing.
+After enqueueing a commit, the server allows up to two minutes while the consumer advances, but fails after
+30 seconds without consumer progress. Browser cancellation still stops the request; an already accepted commit
+can finish in the background. A busy layer can take longer to refresh without blocking unrelated Redis clients.
+
+## Docker resources and BUSY errors
+
+`BUSY Redis is busy running a script` means a script exceeded Redis's busy-response threshold (normally five
+seconds). It does not mean the Redis memory limit was reached. Increasing the threshold masks the symptom;
+small scripts and fewer indexed writes address the blocking work. Do not use `SHUTDOWN NOSAVE` as demo recovery.
+
+There are three separate resource limits:
+
+- Docker Desktop **Settings → Resources → Advanced** controls the VM's total CPUs and memory, shared by all containers.
+- Container `--memory` and `--cpus` flags are ceilings, not reserved allocations. An unconstrained container already
+  shares all resources available to Docker; adding a CPU limit does not give it more CPU.
+- Redis `maxmemory` limits its managed dataset. Leave additional container memory for indexes, buffers, fragmentation,
+  and persistence work; retain `noeviction` so infrastructure and pending data are not silently evicted.
+
+On the inspected machine, Docker had 10 CPUs and 7.65 GiB, Redis had no container-specific cap, and Redis's dataset
+limit was 768 MiB. A larger dataset can use a 2 GiB Redis limit inside a 4 GiB container ceiling, provided other
+containers have sufficient headroom. These commands change the existing container without deleting its volume:
+
+```sh
+docker update --memory 4g --memory-swap 4g gev-redis
+docker exec gev-redis redis-cli CONFIG SET maxmemory 2gb
+```
+
+The Redis setting is runtime-only for the current command-line-configured container. For persistence across
+container restarts/recreation, set `--maxmemory 2gb` in its `redis-server` startup command and retain the existing
+`gev-redis-data:/data` volume. Resource changes above are optional and were not applied by the code change.
+See [Docker resources](https://docs.docker.com/desktop/settings-and-maintenance/settings/) and
+[Redis script execution](https://redis.io/docs/latest/develop/programmability/).
 
 ## Recovery after a manual flush
 
@@ -219,7 +301,9 @@ browser's receipt and snapshot read also retries the Redis path once, preserving
 Switching **No Redis → Redis** performs the repairing connection check before reloading the page. While
 Redis is selected, the two-second status poll detects a new generation and automatically reloads the current
 shared view to clear layer caches and re-ingest enabled feeds, including static layers. A connection outage
-shows the warning; after reconnection the page reloads its layers. Hidden tabs check when visible again.
+shows the warning; successful health checks clear it without reloading the page. A transient timeout is not
+a database reset. Hidden tabs check when visible again. Traffic tile loading is limited to four concurrent
+requests, and disabling traffic cancels queued tiles to reduce load during CCTV startup.
 No direct-source fallback is introduced. Repeated resets or a continuing outage still show an error instead
 of retrying forever. Historic Stream/CMS counts erased by a flush cannot be recovered; they restart from zero.
 

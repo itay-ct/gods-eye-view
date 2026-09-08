@@ -6,6 +6,38 @@ import { packBody, unpackBody, entityDocument } from './payload.js';
 import { RedisPipeline, GROUP } from './pipeline.js';
 import { sourceUrl } from './plugin.js';
 
+test('Flights and Live AIS retain 100K entries through startup and projection', {timeout: 60000}, async () => {
+  const prefix = `gev-retention-test:${randomUUID()}`;
+  const pipeline = new RedisPipeline({prefix});
+  const client = await pipeline.connect();
+  const cleanup = client.duplicate(); cleanup.on('error', () => {}); await cleanup.connect();
+  try {
+    for (const layer of ['flights', 'ais-live-vessels']) {
+      const stream = `${prefix}:${layer}:stream`;
+      // Old acknowledged history must survive both startup and new commits.
+      for (let offset = 0; offset < 100005; offset += 1000) {
+        const tx = client.multi();
+        for (let i = offset; i < Math.min(offset + 1000, 100005); i++) tx.addCommand(['XADD', stream, '*', 'history', String(i)]);
+        await tx.execAsPipeline();
+      }
+      const {state} = await pipeline.ensure(layer);
+      assert.equal(state.maxlen, 100000);
+      assert.equal(await client.xLen(stream), 100000, 'startup uses the layer retention');
+      await pipeline.project(layer, 'one', packBody(Buffer.from(JSON.stringify({rows:[{id:'one', lat:1, lon:2}]})), 'application/json'));
+      assert.equal(await client.xLen(stream), 100000, 'intake and consumer commits keep the larger history');
+    }
+    assert.equal((await pipeline.ensure('military')).state.maxlen, 10000);
+  } finally {
+    await pipeline.close();
+    for (const layer of ['flights', 'ais-live-vessels', 'military']) {
+      await cleanup.sendCommand(['FT.DROPINDEX', `${prefix}:${layer}:idx`]).catch(() => {});
+    }
+    const keys = await cleanup.keys(`${prefix}:*`);
+    if (keys.length) await cleanup.unlink(keys);
+    await cleanup.close();
+  }
+});
+
 test('10K retention preserves a larger snapshot and its lifetime Stream count', {timeout: 60000}, async () => {
   const prefix = `gev-test:${randomUUID()}`;
   const pipeline = new RedisPipeline({prefix});
@@ -270,7 +302,7 @@ test('cancelled ingestion does not append more records or commit a partial snaps
   const packed = packBody(Buffer.from(JSON.stringify({rows: Array.from({length: 1500}, (_, id) => ({id}))})), 'application/json');
   try {
     await assert.rejects(pipeline.project('test', 'cancelled', packed, '', controller.signal), {name: 'AbortError'});
-    assert.equal((await pipeline.stats()).test.entriesAdded, 500, 'only the batch accepted before cancellation remains');
+    assert.equal((await pipeline.stats()).test.entriesAdded, 100, 'only the batch accepted before cancellation remains');
     await assert.rejects(pipeline.snapshot('test', 'cancelled'), /snapshot not found/);
     pipeline.checkEpoch = original;
     const snapshots = [1, 2].map(lat => packBody(Buffer.from(JSON.stringify({rows: [{id: 'shared', lat}]})), 'application/json'));

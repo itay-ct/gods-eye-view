@@ -41,7 +41,7 @@ test('Redis mode requests only the server projection and preserves cancellation'
   globalThis.fetch = async (url, options) => {
     assert.equal(url, '/api/redis/ingest');
     assert.equal(options.signal.aborted, signal.aborted);
-    assert.deepEqual(JSON.parse(options.body), { layer: 'military', url: '/api/adsblol/mil', method: 'GET' });
+    assert.deepEqual(JSON.parse(options.body), { layer: 'military', url: '/api/adsblol/mil', method: 'GET', progressive:true });
     return { ok: false, status: 503 };
   };
   try { assert.equal((await layerFetch('military')('/api/adsblol/mil', { signal })).status, 503); }
@@ -71,7 +71,7 @@ test('satellite filter refresh reuses Redis references and only reingests a miss
   globalThis.fetch = async url => {
     if (url === '/api/redis/ingest') {
       ingests++;
-      return Response.json({snapshotUrl: '/api/redis/snapshot?layer=satellites&cohort=a', headers: {'content-type': 'text/plain'}});
+      return new Response(JSON.stringify({snapshotUrl: '/api/redis/snapshot?layer=satellites&cohort=a', headers: {'content-type': 'text/plain'}}) + '\n' + JSON.stringify({done:true}) + '\n');
     }
     if (failure) {
       const error = failure; failure = null;
@@ -154,4 +154,32 @@ test('OFF blocks every layer, including helper calls; OFF cancels pending reques
     if (location === undefined) delete globalThis.location; else globalThis.location = location;
     if (storage) Object.defineProperty(globalThis, 'sessionStorage', storage); else delete globalThis.sessionStorage;
   }
+});
+
+test('transient health failures recover without requesting a page reload; real Redis resets still recover', async () => {
+  const {updateRedisStatus} = await import('./redisMode.js');
+  const manager={};
+  const healthy={layers:{traffic:{epoch:'a',error:null},cctv:{epoch:'b',error:null}},errors:[]};
+  assert.equal(updateRedisStatus(manager,healthy),false);
+  for(let i=0;i<3;i++) {
+    manager._redisError='Redis unavailable';
+    assert.equal(updateRedisStatus(manager,healthy),false,'timeout recovery must not restart the globe');
+    assert.equal(redisWarning(manager),'');
+  }
+  assert.equal(updateRedisStatus(manager,{layers:{traffic:{error:'timeout'}},errors:[]}),false);
+  assert.equal(updateRedisStatus(manager,healthy),false,'a layer error must not erase its known epoch');
+  assert.equal(updateRedisStatus(manager,{...healthy,layers:{...healthy.layers,traffic:{epoch:'new',error:null}}}),true);
+});
+
+test('warning retry repairs Redis and refreshes only enabled layers without reload or optimistic error clearing', async()=>{
+ const {retryRedisLayers}=await import('./redisMode.js');
+ const original=globalThis.fetch;const calls=[];
+ const manager={getAll:()=>[{id:'traffic'},{id:'radio'}],isEffectivelyEnabled:id=>id==='traffic',
+  refreshLayer:async id=>{calls.push(id);return true;},_refreshTogglePanel:()=>{}};
+ globalThis.fetch=async(url,init)=>{
+  if(url==='/api/redis/retry'){assert.deepEqual(JSON.parse(init.body),{layers:['traffic']});return Response.json({ready:true});}
+  return Response.json({layers:{traffic:{epoch:'a',error:null}},errors:['traffic · source fetch: still unavailable']});
+ };
+ try{await retryRedisLayers(manager);assert.deepEqual(calls,['traffic']);assert.match(redisWarning(manager),/still unavailable/);}
+ finally{globalThis.fetch=original;}
 });

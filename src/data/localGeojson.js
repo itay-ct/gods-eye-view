@@ -374,126 +374,19 @@ export function createLocalGeoJsonLayer({
     }
   };
 
-  return {
-    id,
-    name,
-    icon,
-    source,
-    updateInterval: 0,
-    statsRefreshInterval: 1000,
-
-    init: async (viewer) => {
-      // DataLayerManager calls this once
-    },
-    
-    update: async (viewer, {signal} = {}) => {
-      if (id !== 'local-datacenters' || !redisEnabled() || !_dataSource || !_enabled) return;
-      const response = await fetch(url, {signal, redisReadOnly:true});
-      if (!response.ok) throw new Error('Datacenter Search unavailable');
-      const text = await response.text();
-      signal?.throwIfAborted();
-      if (!_enabled || _destroyed) return;
-      _filterIds = new Set(text.split('\n').filter(line=>line.trim()).map(line=>String(JSON.parse(line).id)));
-      for (const entity of _dataSource.entities.values) entity.show = _filterIds.has(String(entity.id));
-      _count = _filterIds.size;
-      if (viewer.selectedEntity?.__localLayerId === id && !_filterIds.has(String(viewer.selectedEntity.id))) {
-        clearSelectedEntityContextForLayer(id); viewer.selectedEntity = undefined;
-      }
-      _overlayPublisher.hide(); _overlayPublisher.show();
-      _lastVisibilityUpdate = Number.NEGATIVE_INFINITY;
-      viewer.scene.requestRender?.();
-    },
-    
-    /**
-     * @returns {{count:number, lastUpdate:number|null, error:string|null}}
-     *   A dead layer must be distinguishable from an empty one: a failed load
-     *   surfaces `error` (manager chip → UNAVAILABLE) instead of reporting a
-     *   silent zero count as nominal.
-     */
-    getStats: () => {
-      return { count: _count, lastUpdate: _lastUpdate, error: _error };
-    },
-
-    enable: async (viewer) => {
-      if (_destroyed) return;
-      _enabled = true;
-      _stemGeometryDirty = true;
-      _lastVisibilityUpdate = Number.NEGATIVE_INFINITY;
-      _groundRetryArms = 0; // fresh give-up budget per enable-cycle
-      _lastGroundSampleCapability = null;
-      _overlayPublisher.show();
-
-      // 1. Initialize data source
-      if (!_dataSource) {
-        const baseColor = Cesium.Color.fromCssColorString(color);
-
-        // Fetch and parse JSON Lines (.geojsonl) into a FeatureCollection.
-        // The source is built into a local and committed to `_dataSource`
-        // only once setup finishes: a half-built source published early would
-        // make every later enable() skip this block, so the layer could never
-        // clear its error or retry.
-        _error = null;
-        let loaded = null;
-        // Whether the scene has actually accepted `loaded` — the two rollback
-        // windows (before vs after the add settles) need different cleanup.
-        let addedToScene = false;
-        try {
-          const response = await fetch(url, id === 'local-datacenters' ? {redisUnfiltered:true} : undefined);
-          // A 404 returns an HTML body that would otherwise die in JSON.parse
-          // one line later, reported as a parse error for a missing file.
-          if (!response.ok) {
-            throw new Error(`HTTP ${response.status ?? '?'}`);
-          }
-          const text = await response.text();
-          const lines = text.split('\n').filter(l => l.trim().length > 0);
-          
-          const features = lines.map(line => JSON.parse(line));
-          
-          const geojson = {
-            type: 'FeatureCollection',
-            features
-          };
-
-          // Natively parse into entities and use it as our _dataSource
-          loaded = await Cesium.GeoJsonDataSource.load(geojson, {
-            clampToGround: true,
-            stroke: baseColor,
-            fill: baseColor.withAlpha(0.3),
-            strokeWidth: 2,
-            markerSize: 8,
-            markerColor: baseColor,
-          });
-
-          loaded.name = name;
-          loaded.show = false;
-          // Cesium's DataSourceCollection.add() returns a promise and only
-          // inserts on a later microtask. Without this await, a throw during
-          // post-processing would roll back a source the scene had not
-          // accepted yet — and Cesium would then insert the "removed" source
-          // anyway, leaving an orphan the retry would double up on. Awaiting
-          // also routes an add() rejection into the error path below instead
-          // of leaving it uncaught with healthy-looking stats.
-          await viewer.dataSources.add(loaded);
-          addedToScene = true;
-
-          // Convert parsed points into 3D stems or style polygons
-          const entities = loaded.entities.values;
-          _count = entities.length;
-          _stemRecords = [];
-          _stemGeometryDirty = true;
-          
+  function prepareEntities(loaded, entities, baseColor) {
           for (let i = 0; i < entities.length; i++) {
             const feature = entities[i];
             feature.__localLayerId = id; // Tag it so our click handler knows it belongs to this layer
-            
+
             let pos = feature.position?.getValue(Cesium.JulianDate.now());
-            
+
             if (!pos) {
               // It's a polygon or line
               if (feature.polygon) {
                 feature.polygon.outline = true;
                 feature.polygon.outlineColor = baseColor;
-                
+
                 // Calculate center point for the stem
                 const hierarchy = feature.polygon.hierarchy?.getValue(Cesium.JulianDate.now());
                 if (hierarchy && hierarchy.positions && hierarchy.positions.length > 0) {
@@ -572,6 +465,127 @@ export function createLocalGeoJsonLayer({
               }) : null,
             });
           }
+  }
+
+  return {
+    id,
+    name,
+    icon,
+    source,
+    updateInterval: 0,
+    statsRefreshInterval: 1000,
+
+    init: async (viewer) => {
+      // DataLayerManager calls this once
+    },
+
+    update: async (viewer, {signal} = {}) => {
+      if (!redisEnabled() || !_dataSource || !_enabled) return;
+      const response = await fetch(url, {signal, redisReadOnly:true});
+      if (!response.ok) throw new Error('Datacenter Search unavailable');
+      const text = await response.text();
+      signal?.throwIfAborted();
+      if (!_enabled || _destroyed) return;
+      const features = text.split('\n').filter(line=>line.trim()).map(line=>JSON.parse(line));
+      const missing = features.filter(feature => !_dataSource.entities.getById(String(feature.id)));
+      if (missing.length) {
+        const baseColor = Cesium.Color.fromCssColorString(color);
+        const added = await Cesium.GeoJsonDataSource.load({type:'FeatureCollection',features:missing}, {clampToGround:true,stroke:baseColor,fill:baseColor.withAlpha(0.3)});
+        signal?.throwIfAborted(); if (!_enabled || _destroyed) return;
+        const entities = [...added.entities.values]; added.entities.removeAll();
+        for (const entity of entities) _dataSource.entities.add(entity);
+        prepareEntities(_dataSource, entities, baseColor); _stemGeometryDirty = true;
+      }
+      _filterIds = new Set(features.map(feature=>String(feature.id)));
+      for (const entity of _dataSource.entities.values) entity.show = _filterIds.has(String(entity.id));
+      _count = _filterIds.size;
+      if (viewer.selectedEntity?.__localLayerId === id && !_filterIds.has(String(viewer.selectedEntity.id))) {
+        clearSelectedEntityContextForLayer(id); viewer.selectedEntity = undefined;
+      }
+      _overlayPublisher.hide(); _overlayPublisher.show();
+      _lastVisibilityUpdate = Number.NEGATIVE_INFINITY;
+      viewer.scene.requestRender?.();
+    },
+
+    /**
+     * @returns {{count:number, lastUpdate:number|null, error:string|null}}
+     *   A dead layer must be distinguishable from an empty one: a failed load
+     *   surfaces `error` (manager chip → UNAVAILABLE) instead of reporting a
+     *   silent zero count as nominal.
+     */
+    getStats: () => {
+      return { count: _count, lastUpdate: _lastUpdate, error: _error };
+    },
+
+    enable: async (viewer) => {
+      if (_destroyed) return;
+      _enabled = true;
+      _stemGeometryDirty = true;
+      _lastVisibilityUpdate = Number.NEGATIVE_INFINITY;
+      _groundRetryArms = 0; // fresh give-up budget per enable-cycle
+      _lastGroundSampleCapability = null;
+      _overlayPublisher.show();
+
+      // 1. Initialize data source
+      if (!_dataSource) {
+        const baseColor = Cesium.Color.fromCssColorString(color);
+
+        // Fetch and parse JSON Lines (.geojsonl) into a FeatureCollection.
+        // The source is built into a local and committed to `_dataSource`
+        // only once setup finishes: a half-built source published early would
+        // make every later enable() skip this block, so the layer could never
+        // clear its error or retry.
+        _error = null;
+        let loaded = null;
+        // Whether the scene has actually accepted `loaded` — the two rollback
+        // windows (before vs after the add settles) need different cleanup.
+        let addedToScene = false;
+        try {
+          const response = await fetch(url, id === 'local-datacenters' ? {redisUnfiltered:true} : undefined);
+          // A 404 returns an HTML body that would otherwise die in JSON.parse
+          // one line later, reported as a parse error for a missing file.
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status ?? '?'}`);
+          }
+          const text = await response.text();
+          const lines = text.split('\n').filter(l => l.trim().length > 0);
+
+          const features = lines.map(line => JSON.parse(line));
+
+          const geojson = {
+            type: 'FeatureCollection',
+            features
+          };
+
+          // Natively parse into entities and use it as our _dataSource
+          loaded = await Cesium.GeoJsonDataSource.load(geojson, {
+            clampToGround: true,
+            stroke: baseColor,
+            fill: baseColor.withAlpha(0.3),
+            strokeWidth: 2,
+            markerSize: 8,
+            markerColor: baseColor,
+          });
+
+          loaded.name = name;
+          loaded.show = false;
+          // Cesium's DataSourceCollection.add() returns a promise and only
+          // inserts on a later microtask. Without this await, a throw during
+          // post-processing would roll back a source the scene had not
+          // accepted yet — and Cesium would then insert the "removed" source
+          // anyway, leaving an orphan the retry would double up on. Awaiting
+          // also routes an add() rejection into the error path below instead
+          // of leaving it uncaught with healthy-looking stats.
+          await viewer.dataSources.add(loaded);
+          addedToScene = true;
+
+          // Convert parsed points into 3D stems or style polygons
+          const entities = loaded.entities.values;
+          _count = entities.length;
+          _stemRecords = [];
+          _stemGeometryDirty = true;
+
+          prepareEntities(loaded, entities, baseColor);
           // Setup finished — publish it.
           _dataSource = loaded;
           _lastUpdate = Date.now();
@@ -598,15 +612,15 @@ export function createLocalGeoJsonLayer({
           _clickHandler.setInputAction((click) => {
             if (!_enabled) return;
             const picked = viewer.scene.pick(click.position);
-            
+
             if (picked && picked.id && picked.id.__localLayerId === id) {
               const entity = picked.id;
               viewer.selectedEntity = entity;
               selectEntityContext(entity);
-              
+
               // We zoom to the surface base of the stem or the center of the polygon
               let targetPos = null;
-              
+
               if (entity.polyline) {
                 // If it's a stem, fly to the base
                 const positions = entity.polyline.positions.getValue(Cesium.JulianDate.now());
@@ -620,13 +634,13 @@ export function createLocalGeoJsonLayer({
                   targetPos = Cesium.BoundingSphere.fromPoints(hierarchy.positions).center;
                 }
               }
-              
+
               if (targetPos) {
                 const carto = Cesium.Cartographic.fromCartesian(targetPos);
-                
+
                 // Disable interactions so Cesium doesn't magically cancel the flight
                 viewer.scene.screenSpaceCameraController.enableInputs = false;
-                
+
                 viewer.camera.flyTo({
                   destination: Cesium.Cartesian3.fromRadians(carto.longitude, carto.latitude, 5000),
                   duration: 1.5,
@@ -649,11 +663,11 @@ export function createLocalGeoJsonLayer({
 
           const cameraPos = viewer.camera.positionWC;
           if (!cameraPos) return;
-          
+
           const occluder = new Cesium.EllipsoidalOccluder(Cesium.Ellipsoid.WGS84, cameraPos);
           const visibleOverlayRecords = [];
           const refreshStemGeometry = _stemGeometryDirty;
-          
+
           // A scene that cannot sample heights can never ground a record, so it
           // must never arm a retry (the arm would re-arm on every requested
           // frame, forever) and must not spend ANY per-record work trying.

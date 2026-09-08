@@ -2024,7 +2024,14 @@ export class DataLayerManager {
     this._toggleContainer.innerHTML = '';
     if (this.createPanelHeader) this._toggleContainer.appendChild(this.createPanelHeader());
 
-    for (const layer of this.getAll()) {
+    const secondary = ['cctv', 'traffic', 'bikeshare', 'military-installations', 'local-firms', 'rocket-launches'];
+    const more = document.createElement('details');
+    more.className = 'data-layers-more'; more.open = this._moreLayersOpen || false;
+    const summary = document.createElement('summary'); summary.textContent = 'More'; more.appendChild(summary);
+    more.addEventListener('toggle', () => { this._moreLayersOpen = more.open; });
+    const layers = this.getAll();
+    const ordered = [...layers.filter(layer => !secondary.includes(layer.id)), ...secondary.map(id => layers.find(layer => layer.id === id)).filter(Boolean)];
+    for (const layer of ordered) {
       if (!layer.showInTogglePanel) continue;
       const row = document.createElement('div');
       row.className = 'data-toggle-row';
@@ -2095,8 +2102,9 @@ export class DataLayerManager {
       }
 
       this.extendLayerRow?.(layer, row);
-      this._toggleContainer.appendChild(row);
+      (secondary.includes(layer.id) ? more : this._toggleContainer).appendChild(row);
     }
+    if (more.children.length > 1) this._toggleContainer.appendChild(more);
   }
 
   /**

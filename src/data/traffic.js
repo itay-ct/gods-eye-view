@@ -1,4 +1,4 @@
-import { layerFetch } from './redisMode.js';
+import { layerFetch, redisLayerViewReadOnly } from './redisMode.js';
 const fetch = layerFetch('traffic');
 
 import * as Cesium from 'cesium';
@@ -2329,7 +2329,10 @@ const trafficLayer = {
    * @returns {Promise<void>}
    */
   async update() {
-    // No-op — updates are camera-driven
+    if (redisLayerViewReadOnly('traffic') && _enabled && _lastBounds) {
+      _tileCache.clear();
+      await loadRoadsForBounds(_lastBounds, _viewer.camera.positionCartographic.height);
+    }
   },
 
   /**

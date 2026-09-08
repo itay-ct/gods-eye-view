@@ -1,7 +1,11 @@
+import {progressiveMembers} from './progressive.js';
+import {ensureMilitaryIndex, militaryQuery, militaryTypes} from './militarySearch.js';
+import { STAGE, COMMIT } from './projector.js';
+import {ensureRadioIndex,radioQuery} from './radioSearch.js';
 import {ensureAisIndex, aisQuery} from './aisSearch.js';
 import {ensureDatacenterIndex, datacenterQuery, datacenterOperators} from './datacenterSearch.js';
 import { createClient } from 'redis';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { unpackBody, entityDocument } from './payload.js';
 import { satelliteSourceGroup } from '../../src/data/satelliteClass.js';
@@ -12,8 +16,7 @@ export const GROUP = 'view-projector';
 const CONSUMER = 'local-view'; // One local projector; restart drains its own pending list first.
 const TTL = 3600;
 
-// Staging writes and acknowledgements are atomic. A commit publishes entity
-// documents, compact metadata and an ordered List of references atomically.
+// Small scripts protect checkpoints; bulk projection and reads yield between batches.
 const HEALTH = `
 local epoch = redis.call('GET', KEYS[1])
 if not epoch or redis.call('EXISTS', KEYS[2], KEYS[3]) ~= 2 then return false end
@@ -24,131 +27,6 @@ for _, group in ipairs(groups) do
   end
 end
 return false
-`;
-
-const PROJECT = `
-if redis.call('GET', KEYS[2] .. ':projection-schema') ~= ARGV[5] then
-  return redis.error_reply('Redis reset during projection')
-end
-local events = cjson.decode(ARGV[1])
-local function memberships(key, cohort, includeCurrent)
-  local text = redis.call('JSON.GET', key, '.collections')
-  local result = {}
-  if text then
-    for _, member in ipairs(cjson.decode(text)) do
-      if member ~= cohort and redis.call('EXISTS', KEYS[2] .. ':snapshot:' .. member) == 1 then
-        table.insert(result, member)
-      end
-    end
-  end
-  if includeCurrent then table.insert(result, cohort) end
-  return result
-end
--- The same satellite can appear in several feeds. Match GEV's first-group
--- priority, independent of the order in which those feeds finish ingesting.
-local function satelliteType(key, collections, incoming)
-  if not string.find(KEYS[2], ':satellites$') then return end
-  local best = nil
-  for _, cohort in ipairs(collections) do
-    local raw = redis.call('JSON.GET', KEYS[2] .. ':snapshot:' .. cohort)
-    local metadata = raw and cjson.decode(raw) or nil
-    if incoming and cohort == incoming.cohort then metadata = incoming.metadata end
-    local group = metadata and metadata.satelliteGroup
-    if group and group ~= cjson.null and (not best or group.priority < best.priority) then best = group end
-  end
-  if best then
-    redis.call('JSON.SET', key, '.group', cjson.encode(best.group))
-    local id = redis.call('JSON.GET', key, '.id')
-    local label = tonumber(cjson.decode(id)) == 25544 and 'STATION · ISS' or best.type
-    redis.call('JSON.SET', key, '.type', cjson.encode(label))
-  end
-end
-for _, event in ipairs(events) do
-  local m = event.message
-  if not m.epoch or m.epoch == ARGV[5] then
-  local staging = KEYS[2] .. ':staging:' .. m.token
-  local current = KEYS[2] .. ':snapshot:' .. m.cohort
-  local members = current .. ':members'
-  if m.kind == 'record' then
-    redis.call('JSON.SET', staging .. ':' .. m.id, '$', m.document)
-    redis.call('EXPIRE', staging .. ':' .. m.id, 86400)
-  elseif m.kind == 'commit' then
-    local oldToken = redis.call('JSON.GET', current, '.token')
-    if not oldToken or cjson.decode(oldToken) ~= m.token then
-      local items = cjson.decode(m.items)
-      local documents = {}
-      local wanted = {}
-      -- Validate before any publication or counter changes.
-      for i, record in ipairs(items) do
-        local value = redis.call('JSON.GET', staging .. ':' .. record.id)
-        if not value then return redis.error_reply('Incomplete staging snapshot') end
-        documents[i] = value
-        wanted[record.key] = true
-      end
-      local oldMembers = redis.call('LRANGE', members, 0, -1)
-      redis.call('DEL', members)
-      for i, record in ipairs(items) do
-        redis.call('CMS.INCRBY', KEYS[3], record.item, 1)
-        local collections = memberships(record.key, m.cohort, true)
-        local enrichment = {}
-        if string.find(KEYS[2], ':flights$') then
-          local previous = redis.call('JSON.GET', record.key)
-          local old = previous and cjson.decode(previous) or {}
-          local incoming = cjson.decode(documents[i])
-          for _, field in ipairs({'typeCode', 'typeName', 'registration', 'enrichmentUpdatedAt', 'typeKnown'}) do
-            if old[field] and old[field] ~= cjson.null and (not incoming[field] or incoming[field] == cjson.null or (old.enrichmentUpdatedAt or 0) > (incoming.enrichmentUpdatedAt or 0)) then
-              enrichment[field] = cjson.encode(old[field])
-            end
-          end
-        end
-        -- Preserve the original JSON serialization (notably empty arrays).
-        if record.update == 'aircraft-type' then
-          local patch = cjson.decode(documents[i])
-          if redis.call('EXISTS', record.key) == 0 then
-            redis.call('JSON.SET', record.key, '$', cjson.encode({id = patch.id, layer = 'flights', kind = 'aircraft-type'}))
-          end
-          for _, field in ipairs({'typeCode', 'typeName', 'registration', 'enrichmentUpdatedAt'}) do
-            if patch[field] and patch[field] ~= cjson.null and patch[field] ~= '' then
-              redis.call('JSON.SET', record.key, '.' .. field, cjson.encode(patch[field]))
-            end
-          end
-          if patch.typeName and patch.typeName ~= cjson.null and patch.typeName ~= '' then
-            redis.call('JSON.SET', record.key, '.typeKnown', '1')
-          end
-        else
-          redis.call('JSON.SET', record.key, '$', documents[i])
-          for field, value in pairs(enrichment) do
-            if value then redis.call('JSON.SET', record.key, '.' .. field, value) end
-          end
-        end
-        redis.call('JSON.DEL', record.key, '.cohort')
-        redis.call('JSON.SET', record.key, '.collections', cjson.encode(collections))
-        satelliteType(record.key, collections, {cohort = m.cohort, metadata = cjson.decode(m.metadata)})
-        redis.call('EXPIRE', record.key, ARGV[3])
-        redis.call('RPUSH', members, record.key)
-        redis.call('DEL', staging .. ':' .. record.id)
-      end
-      for _, key in ipairs(oldMembers) do
-        if not wanted[key] then
-          local collections = memberships(key, m.cohort, false)
-          if #collections == 0 and not string.find(key, ':flights:entity:states:') then redis.call('DEL', key)
-          else
-            redis.call('JSON.SET', key, '.collections', cjson.encode(collections))
-            satelliteType(key, collections, nil)
-          end
-        end
-      end
-      redis.call('EXPIRE', members, ARGV[3])
-      -- Metadata has only envelope, group paths/counts and generation details.
-      redis.call('JSON.SET', current, '$', m.metadata)
-      redis.call('EXPIRE', current, ARGV[3])
-    end
-  end
-  end
-  redis.call('XACK', KEYS[1], ARGV[2], event.id)
-end
-redis.call('XTRIM', KEYS[1], 'MAXLEN', '=', ARGV[4], 'ACKED')
-return #events
 `;
 
 export function snapshotMetadata(manifest, source = '') {
@@ -163,6 +41,8 @@ export class RedisPipeline {
     this.url = url;
     this.prefix = prefix;
     this.maxlen = Math.max(1000, maxlen);
+    this.batchSize = 25;
+    this.scriptHashes = new Map();
     this.layers = new Map();
     this.queues = new Map();
     this.repairs = new Map();
@@ -211,8 +91,10 @@ export class RedisPipeline {
     const client = await this.connect();
     const keys = this.keys(layer);
     if (layer === 'satellites') await ensureSatelliteIndex(client, this.prefix);
+    if (layer === 'radio') await ensureRadioIndex(client, this.prefix);
     if (layer === 'ais-live-vessels') await ensureAisIndex(client, this.prefix);
     if (layer === 'local-datacenters') await ensureDatacenterIndex(client, this.prefix);
+    if (layer === 'military') await ensureMilitaryIndex(client, this.prefix);
     if (layer === 'flights') await ensureFlightIndex(client, this.prefix);
     const previous = this.layers.get(layer);
     if (previous) await previous.ready.catch(() => {});
@@ -227,7 +109,7 @@ export class RedisPipeline {
       if (previous.reader?.isOpen) previous.reader.destroy();
       await previous.running;
     }
-    const state = {...keys, error: null, stopped: false, epoch: null};
+    const state = {...keys, maxlen: ['flights', 'ais-live-vessels'].includes(layer) ? 100000 : this.maxlen, error: null, stopped: false, epoch: null};
     this.layers.set(layer, state);
     state.running = this.start(state, !epoch).catch(error => {
       state.error = error.message;
@@ -289,7 +171,8 @@ export class RedisPipeline {
       await client.sendCommand(['CMS.INITBYPROB', state.cms, '0.001', '0.01']).catch(error => { if (!/already exists/i.test(error.message)) throw error; });
       state.epoch = reset || !schema?.startsWith('3:') ? `3:${randomUUID()}` : schema;
       await client.set(schemaKey, state.epoch);
-      await client.sendCommand(['XTRIM', state.stream, 'MAXLEN', '=', String(this.maxlen), 'ACKED']);
+      if (reset) await client.unlink(`${state.base}:publishing`);
+      await client.sendCommand(['XTRIM', state.stream, 'MAXLEN', '=', String(state.maxlen), 'ACKED']);
       state.reader = await this.client();
     })();
     await state.ready;
@@ -307,33 +190,96 @@ export class RedisPipeline {
           message.items = JSON.stringify(manifest.items);
         }
       }
-      await client.eval(PROJECT, { keys: [state.stream, state.base, state.cms], arguments: [JSON.stringify(messages), GROUP, String(TTL), String(this.maxlen), state.epoch] });
+      // A commit may reference 100K records; never loop through all of them in Lua.
+      let staged = [];
+      const flush = async () => {
+        if (!staged.length) return;
+        for (let offset = 0; offset < staged.length; offset += this.batchSize) {
+          await this.runProjector(client, state, STAGE, staged.slice(offset, offset + this.batchSize));
+        }
+        staged = [];
+      };
+      for (const event of messages) {
+        if (event.message.kind === 'commit') {
+          await flush();
+          await this.commitSnapshot(client, state, event);
+        } else staged.push(event);
+      }
+      await flush();
+      await client.sendCommand(['XTRIM', state.stream, 'MAXLEN', '=', String(state.maxlen), 'ACKED']);
     }
   }
+  async runProjector(client, state, script, payload) {
+    if (this.closed || state.stopped) throw new Error('Redis projector stopped');
+    const sha = this.scriptHashes.get(script) || createHash('sha1').update(script).digest('hex');
+    this.scriptHashes.set(script, sha);
+    const options = {keys: [state.stream, state.base, state.cms],
+      arguments: [JSON.stringify(payload), GROUP, String(TTL), String(state.maxlen), state.epoch]};
+    try {const result = await client.evalSha(sha, options); state.progressAt = Date.now(); return result;}
+    catch (error) {
+      if (!error.message.includes('NOSCRIPT')) throw error;
+      await client.scriptLoad(script);
+      const result = await client.evalSha(sha, options); state.progressAt = Date.now(); return result;
+    }
+  }
+  async commitSnapshot(client, state, {id: eventId, message}) {
+    if (message.epoch && message.epoch !== state.epoch) {
+      await client.xAck(state.stream, GROUP, eventId);
+      return;
+    }
+    const items = JSON.parse(message.items);
+    const metadata = JSON.parse(message.metadata);
+    const common = {token: message.token, cohort: message.cohort, eventId, metadata};
+    const work = `${state.base}:staging:${message.token}:commit`;
+    const current = `${state.base}:snapshot:${message.cohort}`;
+    const published = await client.sendCommand(['JSON.GET', current, '.token']);
+    if (published && JSON.parse(published) === message.token) {
+      await client.xAck(state.stream, GROUP, eventId);
+      return;
+    }
+    // Validate a fresh generation in bounded pipelines before publishing anything.
+    if (!await client.exists(work)) {
+      for (let offset = 0; offset < items.length; offset += 250) {
+        const tx = client.multi();
+        for (const item of items.slice(offset, offset + 250)) tx.exists(`${state.base}:staging:${message.token}:${item.id}`);
+        if ((await tx.execAsPipeline()).some(exists => !exists)) throw new Error('Incomplete staging snapshot');
+      }
+    }
+    await this.runProjector(client, state, COMMIT, {...common, phase: 'begin', metadataText: message.metadata});
+    for (let offset = Number(await client.hGet(work, 'publish')); offset < items.length; offset += this.batchSize) {
+      await this.runProjector(client, state, COMMIT, {...common, phase: 'publish', offset, items: items.slice(offset, offset + this.batchSize)});
+    }
+    for (let offset = Number(await client.hGet(work, 'cleanup'));; offset += this.batchSize) {
+      const old = await client.lRange(`${current}:members`, offset, offset + this.batchSize - 1);
+      if (!old.length) break;
+      await this.runProjector(client, state, COMMIT, {...common, phase: 'cleanup', offset, items: old});
+    }
+    await this.runProjector(client, state, COMMIT, {...common, phase: 'finish', metadataText: message.metadata});
+  }
   // Serialize commits for the same source while keeping each request cancellable.
-  async project(layer, cohort, packed, source = '', signal = null) {
+  async project(layer, cohort, packed, source = '', signal = null, readBack = true) {
     const key = `${layer}:${cohort}`;
     const previous = this.queues.get(key) || Promise.resolve();
-    const result = previous.catch(() => {}).then(() => this.projectSnapshot(layer, cohort, packed, source, signal));
+    const result = previous.catch(() => {}).then(() => this.projectSnapshot(layer, cohort, packed, source, signal, readBack));
     this.queues.set(key, result);
     try {return await result;}
     finally {if (this.queues.get(key) === result) this.queues.delete(key);}
   }
-  async projectSnapshot(layer, cohort, packed, source, signal) {
+  async projectSnapshot(layer, cohort, packed, source, signal, readBack) {
     signal?.throwIfAborted();
     const initial = await this.ensure(layer);
-    try { return await this.projectOnce(layer, cohort, packed, source, initial, signal); }
+    try { return await this.projectOnce(layer, cohort, packed, source, initial, signal, readBack); }
     catch (error) {
       signal?.throwIfAborted();
       const repaired = await this.ensure(layer);
       if (repaired.state.epoch === initial.state.epoch) throw error;
-      return this.projectOnce(layer, cohort, packed, source, repaired, signal);
+      return this.projectOnce(layer, cohort, packed, source, repaired, signal, readBack);
     }
   }
-  async projectOnce(layer, cohort, packed, source, initialized, signal) {
+  async projectOnce(layer, cohort, packed, source, initialized, signal, readBack) {
     signal?.throwIfAborted();
     const { client, state, base, stream } = initialized;
-    if (await client.xLen(stream) > this.maxlen * 2) throw new Error('Redis stream backlog is full; intake paused');
+    if (await client.xLen(stream) > state.maxlen * 2) throw new Error('Redis stream backlog is full; intake paused');
     const token = randomUUID();
     const common = { cohort, token, epoch: state.epoch };
     const records = packed.records.map(record => {
@@ -342,11 +288,11 @@ export class RedisPipeline {
       return { ...record, key, document: JSON.stringify(document) };
     });
     // Bounded pipelines avoid tens of thousands of concurrent socket promises.
-    for (let offset = 0; offset < records.length; offset += 500) {
+    for (let offset = 0; offset < records.length; offset += 100) {
       // Large snapshots can exceed retention: wait for the consumer to stage
       // and acknowledge earlier records instead of growing the Stream unchecked.
       const deadline = Date.now() + 10000;
-      while (await client.xLen(stream) >= this.maxlen * 2) {
+      while (await client.xLen(stream) >= state.maxlen * 2) {
         signal?.throwIfAborted();
         if (state.error) throw new Error(`Redis projector: ${state.error}`);
         if (Date.now() >= deadline) throw new Error('Redis stream backlog is full; intake paused');
@@ -356,8 +302,8 @@ export class RedisPipeline {
       await this.checkEpoch(client, state);
       signal?.throwIfAborted();
       const tx = client.multi();
-      for (const record of records.slice(offset, offset + 500)) {
-        tx.addCommand(['XADD', stream, 'MAXLEN', '~', String(this.maxlen), 'ACKED', '*', 'kind', 'record', ...Object.entries({ ...common, id: record.id, document: record.document }).flat()]);
+      for (const record of records.slice(offset, offset + 100)) {
+        tx.addCommand(['XADD', stream, 'MAXLEN', '~', String(state.maxlen), 'ACKED', '*', 'kind', 'record', ...Object.entries({ ...common, id: record.id, document: record.document }).flat()]);
       }
       await tx.execAsPipeline();
     }
@@ -365,19 +311,23 @@ export class RedisPipeline {
     await this.checkEpoch(client, state);
     signal?.throwIfAborted();
     const manifest = { ...packed.manifest, token, items: records.map(({ id, item, key, update }) => ({ id, item, key, ...(update ? {update} : {}) })) };
-    await client.sendCommand(['XADD', stream, 'MAXLEN', '~', String(this.maxlen), 'ACKED', '*', 'kind', 'commit', ...Object.entries({ ...common, items: JSON.stringify(manifest.items), metadata: JSON.stringify(snapshotMetadata(manifest, source)), at: String(Date.now()) }).flat()]);
+    await client.sendCommand(['XADD', stream, 'MAXLEN', '~', String(state.maxlen), 'ACKED', '*', 'kind', 'commit', ...Object.entries({ ...common, items: JSON.stringify(manifest.items), metadata: JSON.stringify(snapshotMetadata(manifest, source)), at: String(Date.now()) }).flat()]);
     const key = `${base}:snapshot:${cohort}`;
-    const deadline = Date.now() + 30000;
+    const started = Date.now();
+    const deadline = started + 120000;
     while (Date.now() < deadline) {
       signal?.throwIfAborted();
+      if (Date.now() - Math.max(started, state.progressAt || 0) > 30000) {
+        throw new Error('Redis projection stalled: no consumer progress for 30 seconds');
+      }
       await this.checkEpoch(client, state);
       const projected = await client.sendCommand(['JSON.GET', key, '.token']);
       if (projected && JSON.parse(projected) === token) {
-        return this.snapshot(layer, cohort, token);
+        return readBack ? this.snapshot(layer, cohort, token, null, signal) : undefined;
       }
       await delay(25);
     }
-    throw new Error('Redis projection timed out');
+    throw new Error('Redis projection exceeded the two-minute processing limit');
   }
   async checkEpoch(client, state) {
     if (state.stopped || await client.get(`${state.base}:projection-schema`) !== state.epoch) {
@@ -386,46 +336,61 @@ export class RedisPipeline {
     if (state.error) throw new Error(`Redis projector: ${state.error}`);
   }
   /** Read-only view: no upstream fetch, XADD, projection, or fallback occurs here. */
-  async snapshot(layer, cohort, token = null, filter = null) {
+  async snapshot(layer, cohort, token = null, filter = null, signal = null, progressive = false) {
     const client = await this.connect();
     const { base } = this.keys(layer);
-    if (filter && !['satellites', 'flights', 'local-datacenters', 'ais-live-vessels'].includes(layer)) throw new Error('Unsupported filter layer');
-    const flightView = layer === 'flights' && /\/api\/opensky(?:\?|$)/.test(JSON.parse(await client.sendCommand(['JSON.GET', `${base}:snapshot:${cohort}`]) || '{}').source || '');
-    const terms = flightView ? flightQuery(filter || {}) : filter ? (layer === 'ais-live-vessels' ? aisQuery(filter) : layer === 'local-datacenters' ? datacenterQuery(filter) : satelliteQuery(filter)) : '';
-    const query = flightView ? terms : filter ? `${terms === '*' ? '' : `(${terms}) `}@collections:{${cohort.replace(/[^\w]/g, '\\$&')}}` : '';
-    const index = (filter || flightView) ? await (layer === 'flights' ? ensureFlightIndex : layer === 'ais-live-vessels' ? ensureAisIndex : layer === 'local-datacenters' ? ensureDatacenterIndex : ensureSatelliteIndex)(client, this.prefix) : '';
-    // Read the metadata, ordered references and entity sources atomically.
-    const result = await client.eval(`
-      local metadata = redis.call('JSON.GET', KEYS[1])
-      if not metadata then return redis.error_reply('Redis snapshot not found') end
-      local keys = redis.call('LRANGE', KEYS[1] .. ':members', 0, -1)
-      if #keys ~= cjson.decode(metadata).count then return redis.error_reply('Redis snapshot membership incomplete') end
-      if ARGV[4] == '1' then
-        local found = redis.call('FT.SEARCH', ARGV[2], ARGV[1], 'NOCONTENT', 'LIMIT', '0', '100000', 'DIALECT', '2')
-        if found[1] ~= #found - 1 then return redis.error_reply('Flight Search result was truncated') end
-        local result = {metadata}
-        for i = 2, #found do table.insert(result, redis.call('JSON.GET', found[i])) end
-        return result
-      end
-      local matches = nil
-      if ARGV[1] ~= '' then
-        matches = {}
-        if #keys > 0 then
-          local found = redis.call('FT.SEARCH', ARGV[2], ARGV[1], 'NOCONTENT', 'LIMIT', '0', tostring(#keys), 'DIALECT', '2')
-          if found[1] ~= #found - 1 then return redis.error_reply('Satellite Search result was truncated') end
-          for i = 2, #found do matches[found[i]] = true end
-        end
-      end
-      local result = {metadata}
-      for _, key in ipairs(keys) do
-        if not matches or matches[key] then
-          local source = ARGV[3] == 'flights' and redis.call('JSON.GET', key) or redis.call('JSON.GET', key, '.source')
-          if not source then return redis.error_reply('Redis entity missing from snapshot') end
-          table.insert(result, source)
-        end
-      end
-      return result
-    `, { keys: [`${base}:snapshot:${cohort}`], arguments: [query, index, layer, flightView ? '1' : '0'] });
+    if (filter && !['satellites', 'flights', 'military', 'local-datacenters', 'ais-live-vessels', 'radio'].includes(layer)) throw new Error('Unsupported filter layer');
+    const read = async () => {
+      const key = `${base}:snapshot:${cohort}`;
+      let metadata, groups;
+      if (progressive) ({metadata, groups} = await progressiveMembers(client, base, cohort));
+      else {
+        const text = await client.sendCommand(['JSON.GET', key]);
+        if (!text) throw new Error('Redis snapshot not found');
+        metadata = JSON.parse(text);
+        groups = [];
+        let offset = 0;
+        for (const group of metadata.groups) {
+          const keys = [];
+          for (let i = 0; i < group.count; i += 500) {
+            signal?.throwIfAborted();
+            keys.push(...await client.lRange(`${key}:members`, offset+i, offset+Math.min(i+499,group.count-1)));
+          }
+          if (keys.length !== group.count) throw new Error('Redis snapshot membership incomplete');
+          groups.push({path:group.path, keys}); offset += group.count;
+        }
+      }
+      const keys = groups.flatMap(group => group.keys);
+      const flightView = layer === 'flights' && /\/api\/opensky(?:\?|$)/.test(metadata.source || '');
+      let selected = keys;
+      if (filter || flightView) {
+        const terms = flightView ? flightQuery(filter || {}) : (layer === 'military' ? militaryQuery : layer === 'radio' ? radioQuery : layer === 'ais-live-vessels' ? aisQuery : layer === 'local-datacenters' ? datacenterQuery : satelliteQuery)(filter);
+        const query = flightView ? terms : `${terms === '*' ? '' : `(${terms}) `}@collections:{${cohort.replace(/[^\w]/g, '\\$&')}}`;
+        const index = await (layer === 'military' ? ensureMilitaryIndex : layer === 'flights' ? ensureFlightIndex : layer === 'radio' ? ensureRadioIndex : layer === 'ais-live-vessels' ? ensureAisIndex : layer === 'local-datacenters' ? ensureDatacenterIndex : ensureSatelliteIndex)(client, this.prefix);
+        // Search is its own command, never nested inside a script that also reads every JSON.
+        const found = await client.sendCommand(['FT.SEARCH', index, query, 'NOCONTENT', 'LIMIT', '0', '100000', 'DIALECT', '2']);
+        if (found[0] !== found.length - 1) throw new Error('Redis Search result was truncated');
+        const matches = new Set(found.slice(1));
+        selected = flightView ? [...matches] : keys.filter(key => matches.has(key));
+      }
+      const result = [JSON.stringify(metadata)];
+      const kept = new Set();
+      for (let offset = 0; offset < selected.length; offset += 100) {
+        signal?.throwIfAborted();
+        const tx = client.multi();
+        for (const entity of selected.slice(offset, offset + 100)) {
+          tx.addCommand(['JSON.GET', entity, ...(layer === 'flights' ? [] : ['.source'])]);
+        }
+        const values = await tx.execAsPipeline();
+        if (!progressive && values.some(value => !value)) throw new Error('Redis entity missing from snapshot');
+        values.forEach((value, i) => {if (value) {result.push(value); kept.add(selected[offset+i]);}});
+      }
+      if (progressive) result[0] = JSON.stringify({...metadata,
+        groups:groups.map(group=>({path:group.path,count:group.keys.filter(key=>kept.has(key)).length})),
+        count:result.length-1});
+      return result;
+    };
+    const result = progressive ? await read() : await this.consistentRead(layer, read, signal);
     const metadata = JSON.parse(result[0]);
     if (token && metadata.token !== token) throw new Error('Projection changed during snapshot read');
     if (layer === 'flights') {
@@ -443,6 +408,8 @@ export class RedisPipeline {
       }
       for (let i = 0; i < documents.length; i++) result[i + 1] = JSON.stringify(documents[i].source);
     }
+    if (filter && layer === 'military') return Buffer.from(JSON.stringify({...metadata.template, ac:result.slice(1).map(JSON.parse)}));
+    if (filter && layer === 'radio') return Buffer.from(JSON.stringify({...metadata.template, stations:result.slice(1).map(JSON.parse)}));
     if (filter && layer === 'ais-live-vessels') return Buffer.from(JSON.stringify({...metadata.template, rows:result.slice(1).map(JSON.parse)}));
     if (filter && layer === 'local-datacenters') return Buffer.from(result.slice(1).join('\n'));
     if (filter) {
@@ -456,11 +423,36 @@ export class RedisPipeline {
     return unpackBody(manifest, Object.fromEntries(result.slice(1).map((source, i) => [String(i), source])));
   }
 
-  async datacenterOperators(name = '') { return datacenterOperators(await this.connect(), this.prefix, name); }
+  /** Retry a read if any chunked publication overlapped it; never serve a mixed snapshot. */
+  async consistentRead(layer, read, signal = null) {
+    const client = await this.connect();
+    const {base} = this.keys(layer);
+    const guard = () => client.mGet([`${base}:projection-schema`, `${base}:revision`, `${base}:publishing`]);
+    const deadline = Date.now() + 30000;
+    while (Date.now() < deadline) {
+      signal?.throwIfAborted();
+      const before = await guard();
+      if (before[2]) {await delay(25); continue;}
+      let result, failure;
+      try {result = await read();} catch (error) {failure = error;}
+      signal?.throwIfAborted();
+      const after = await guard();
+      if (before.every((value, i) => value === after[i])) {
+        if (failure) throw failure;
+        return result;
+      }
+      await delay(5);
+    }
+    throw new Error('Redis projection is still publishing; retry the snapshot');
+  }
 
-  async flightTypeSummary(label = '') { return flightTypeSummary(await this.connect(), this.prefix, label); }
+  async militaryTypes(label = '', signal = null) { return this.consistentRead('military', async () => militaryTypes(await this.connect(), this.prefix, label), signal); }
 
-  async flightTypes(label = '') { return flightTypeOptions(await this.connect(), this.prefix, label); }
+  async datacenterOperators(name = '', signal = null) { return this.consistentRead('local-datacenters', async () => datacenterOperators(await this.connect(), this.prefix, name), signal); }
+
+  async flightTypeSummary(label = '', signal = null) { return this.consistentRead('flights', async () => flightTypeSummary(await this.connect(), this.prefix, label), signal); }
+
+  async flightTypes(label = '') { return this.consistentRead('flights', async () => flightTypeOptions(await this.connect(), this.prefix, label)); }
 
   /** Read-only estimate; never creates a sketch or ingests a source. */
   async updateCount(layer, id) {

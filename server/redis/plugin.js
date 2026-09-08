@@ -1,3 +1,5 @@
+import {militaryQuery} from './militarySearch.js';
+import {radioQuery} from './radioSearch.js';
 import {aisQuery} from './aisSearch.js';
 import {datacenterQuery} from './datacenterSearch.js';
 import { RedisPipeline } from './pipeline.js';
@@ -58,6 +60,9 @@ export function redisLayersPlugin({pipelineOptions} = {}) {
       server.middlewares.use('/api/redis', async (req, res) => {
         const route = new URL(req.url, 'http://localhost').pathname;
         let requestLayer = null;
+        let requestStage = 'Redis';
+        let requestSource = '';
+        let streaming = false, heartbeat;
         const controller = new AbortController();
         const signal = controller.signal;
         res.once('close', () => {
@@ -87,13 +92,19 @@ export function redisLayersPlugin({pipelineOptions} = {}) {
           }
           if (route === '/datacenter-operators' && req.method === 'GET') {
             requestLayer = 'local-datacenters';
-            const summary = await pipeline.datacenterOperators(new URL(req.url, 'http://localhost').searchParams.get('name') || '');
+            const summary = await pipeline.datacenterOperators(new URL(req.url, 'http://localhost').searchParams.get('name') || '', signal);
             errors.delete(`${requestLayer}:${route}`);
+            return json(res, 200, summary);
+          }
+          if (route === '/military-types' && req.method === 'GET') {
+            requestLayer = 'military';
+            const summary = await pipeline.militaryTypes(new URL(req.url, 'http://localhost').searchParams.get('label') || '', signal);
+            errors.delete(`military:${route}`);
             return json(res, 200, summary);
           }
           if (route === '/flight-types' && req.method === 'GET') {
             requestLayer = 'flights';
-            const summary = await pipeline.flightTypeSummary(new URL(req.url, 'http://localhost').searchParams.get('label') || '');
+            const summary = await pipeline.flightTypeSummary(new URL(req.url, 'http://localhost').searchParams.get('label') || '', signal);
             errors.delete(`flights:${route}`);
             return json(res, 200, summary);
           }
@@ -103,18 +114,36 @@ export function redisLayersPlugin({pipelineOptions} = {}) {
             const cohort = query.get('cohort');
             if (!Object.hasOwn(paths, layer) || !/^(?:[a-f0-9]{24}|bundled)$/.test(cohort || '')) return json(res, 400, { error: 'Invalid snapshot reference' });
             requestLayer = layer;
-            const filter = query.get('filter') === '1' ? (layer === 'flights'
+            const filter = query.get('filter') === '1' ? (['flights', 'military'].includes(layer)
               ? {label: query.get('label') || '', typeName: query.get('typeName') || ''}
-              : layer === 'ais-live-vessels' ? {label:query.get('label') || ''} : layer === 'local-datacenters' ? {name:query.get('name') || '', operator:query.get('operator') || ''} : { name: query.get('name') || '', type: query.get('type') || '' }) : null;
+              : layer === 'radio' ? {name:query.get('name') || '',tag:query.get('tag') || 'all'} : layer === 'ais-live-vessels' ? {label:query.get('label') || ''} : layer === 'local-datacenters' ? {name:query.get('name') || '', operator:query.get('operator') || ''} : { name: query.get('name') || '', type: query.get('type') || '' }) : null;
             if (filter) {
-              if (!['satellites', 'flights', 'local-datacenters', 'ais-live-vessels'].includes(layer)) return json(res, 400, {error: 'Unsupported filter layer'});
-              try { (layer === 'flights' ? flightQuery : layer === 'ais-live-vessels' ? aisQuery : layer === 'local-datacenters' ? datacenterQuery : satelliteQuery)(filter); } catch (error) { return json(res, 400, {error: error.message}); }
+              if (!['satellites', 'flights', 'military', 'local-datacenters', 'ais-live-vessels', 'radio'].includes(layer)) return json(res, 400, {error: 'Unsupported filter layer'});
+              try { (layer === 'military' ? militaryQuery : layer === 'flights' ? flightQuery : layer === 'radio' ? radioQuery : layer === 'ais-live-vessels' ? aisQuery : layer === 'local-datacenters' ? datacenterQuery : satelliteQuery)(filter); } catch (error) { return json(res, 400, {error: error.message}); }
             }
-            const body = await pipeline.snapshot(layer, cohort, null, filter);
+            let body;
+            try {body = await pipeline.snapshot(layer, cohort, null, filter, signal, query.get('progressive') === '1');}
+            catch (error) {
+              if (query.get('progressive') === '1' && error.message === 'Redis projection not ready') return json(res, 202, {pending:true});
+              throw error;
+            }
             errors.delete(`${requestLayer}:${route}`);
             res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Cache-Control': 'no-store', 'X-GEV-Data-Path': 'redis-json',
+              ...(query.get('progressive') === '1' ? {'X-GEV-Progressive':'1'} : {}),
               ...(filter ? {'X-GEV-Filtered': '1'} : {}) });
             return res.end(body);
+          }
+          if (route === '/retry' && req.method === 'POST') {
+            const origin=req.headers.origin;
+            if(origin && new URL(origin).host!==req.headers.host) return json(res,403,{error:'Same-origin requests only'});
+            if(!req.headers['content-type']?.startsWith('application/json')) return json(res,415,{error:'JSON required'});
+            const body=await readRequest(req);
+            if(!Array.isArray(body.layers) || body.layers.some(layer=>!Object.hasOwn(paths,layer))) return json(res,400,{error:'Invalid layers'});
+            await pipeline.connect();
+            for(const layer of new Set(body.layers)) await pipeline.ensure(layer);
+            // Clear historical request failures; retried requests will record any current failures.
+            errors.clear();
+            return json(res,200,{ready:true});
           }
           if (!['/ingest', '/local'].includes(route) || req.method !== 'POST') return json(res, 404, { error: 'Unknown Redis endpoint' });
           // JSON + same-origin checks prevent a third-party page driving local ingestion.
@@ -126,7 +155,7 @@ export function redisLayersPlugin({pipelineOptions} = {}) {
           if (route === '/local') {
             if (request.layer !== 'cctv' || !Array.isArray(request.records) || request.records.length > 1000) return json(res, 400, { error: 'Unsupported bundled catalogue' });
             const packed = packBody(Buffer.from(JSON.stringify(request.records)), 'application/json');
-            await pipeline.project('cctv', 'bundled', packed, '', signal);
+            await pipeline.project('cctv', 'bundled', packed, '', signal, false);
             errors.delete(`${requestLayer}:${route}`);
             return json(res, 200, { snapshotUrl: '/api/redis/snapshot?layer=cctv&cohort=bundled', headers: { 'content-type': 'application/json' } });
           }
@@ -138,11 +167,19 @@ export function redisLayersPlugin({pipelineOptions} = {}) {
           const method = request.method || 'GET';
           if (!['GET', 'POST'].includes(method) || (method === 'POST' && !url.includes('/api/overpass'))) return json(res, 400, { error: 'Unsupported source method' });
           const cohort = digest(`${url}\n${method}\n${request.body || ''}`).slice(0, 24);
+          if (request.progressive === true) {
+            streaming = true;
+            res.writeHead(200, {'Content-Type':'application/x-ndjson', 'Cache-Control':'no-store', 'X-Accel-Buffering':'no'});
+            res.write(JSON.stringify({snapshotUrl:`/api/redis/snapshot?layer=${encodeURIComponent(request.layer)}&cohort=${cohort}&progressive=1`,headers:{}}) + '\n');
+            heartbeat = setInterval(() => {if (!res.destroyed) res.write('{"progress":true}\n');}, 1000);
+          }
           const result = await (async () => {
             // Check Redis before spending provider credits. Never silently bypass it.
             signal.throwIfAborted();
             await pipeline.ensure(request.layer);
             signal.throwIfAborted();
+            requestStage = 'source fetch';
+            requestSource = new URL(url).pathname;
             const upstream = await fetch(url, {
               method,
               ...(method === 'POST' ? { body: request.body, headers: { 'Content-Type': 'application/x-www-form-urlencoded' } } : {}),
@@ -152,25 +189,33 @@ export function redisLayersPlugin({pipelineOptions} = {}) {
             if (buffer.length > 32 * 1024 * 1024) throw new Error('Source snapshot exceeds 32 MiB');
             const headers = Object.fromEntries([...upstream.headers].filter(([key]) => key === 'content-type' || key === 'retry-after' || key.startsWith('x-')));
             headers['cache-control'] = 'no-store';
-            if (!upstream.ok) return { status: upstream.status, headers, body: buffer };
+            if (streaming && !res.destroyed) res.write(JSON.stringify({headers}) + '\n');
+            if (!upstream.ok) {
+              errors.set(`${requestLayer}:${route}`, `${requestLayer} · source fetch ${requestSource}: HTTP ${upstream.status}`);
+              return { status: upstream.status, headers, body: buffer };
+            }
+            requestStage = 'source parsing';
             const packed = packBody(buffer, upstream.headers.get('content-type'), url);
             if (request.layer === 'flights') await enrichFlightRecords(packed);
             if (packed.records.length > 100000) throw new Error('Source snapshot exceeds 100,000 records');
-            await pipeline.project(request.layer, cohort, packed, request.url, signal);
+            requestStage = 'Redis projection';
+            await pipeline.project(request.layer, cohort, packed, request.url, signal, false);
             return { status: 200, headers: { 'content-type': 'application/json', 'cache-control': 'no-store' }, body: JSON.stringify({
               snapshotUrl: `/api/redis/snapshot?layer=${encodeURIComponent(request.layer)}&cohort=${cohort}`, headers,
             }) };
           })();
-          errors.delete(`${requestLayer}:${route}`);
-          res.writeHead(result.status, result.headers);
-          res.end(result.body);
+          if (result.status < 400) errors.delete(`${requestLayer}:${route}`);
+          if (streaming) res.end(JSON.stringify(result.status < 400 ? {done:true} : {error:`${requestLayer} source returned HTTP ${result.status}`}) + '\n');
+          else {res.writeHead(result.status, result.headers); res.end(result.body);}
         } catch (error) {
           if (signal.aborted) { if (!res.destroyed) res.destroy(); return; }
-          if (requestLayer) errors.set(`${requestLayer}:${route}`, `${requestLayer}: ${error.message}`);
-          console.warn('[Redis layers]', error.message);
-          if (!res.headersSent) json(res, 503, { error: 'Redis pipeline unavailable; check the local Redis server and projector.', detail: error.message });
+          const detail = `${requestLayer || 'Redis'} · ${requestStage}${requestSource ? ' ' + requestSource : ''}: ${error.message}`;
+          if (requestLayer) errors.set(`${requestLayer}:${route}`, detail);
+          console.warn('[Redis layers]', detail);
+          if (streaming && !res.destroyed) res.end(JSON.stringify({error:detail}) + '\n');
+          else if (!res.headersSent) json(res, requestStage === 'source fetch' ? 504 : 503, { error: detail, detail: error.message, stage: requestStage });
           else res.end();
-        }
+        } finally {clearInterval(heartbeat);}
       });
       server.httpServer?.once('close', () => { void pipeline.close(); });
     },

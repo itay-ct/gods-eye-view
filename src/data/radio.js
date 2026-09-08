@@ -1,4 +1,6 @@
-import { layerFetch } from './redisMode.js';
+import {MUSIC_GENRES, CATEGORY_MATCHERS, normalizeRadioTag, stationMatchesRadioCategory} from './radioTags.js';
+export {normalizeRadioTag, stationMatchesRadioCategory} from './radioTags.js';
+import { layerFetch, redisEnabled } from './redisMode.js';
 const fetch = layerFetch('radio');
 
 /**
@@ -76,43 +78,6 @@ const _radioEarthScreenCenter = new Cesium.Cartesian2();
 const _radioEarthToCenter = new Cesium.Cartesian3();
 export const DEFAULT_RADIO_FILTER = 'all';
 export const GLOBAL_RADIO_ALTITUDE_M = 2_000_000;
-
-const MUSIC_GENRES = Object.freeze([
-  ['alternative', 'Alternative'],
-  ['ambient', 'Ambient'],
-  ['blues', 'Blues'],
-  ['classical', 'Classical'],
-  ['country', 'Country'],
-  ['dance', 'Dance'],
-  ['electronic', 'Electronic'],
-  ['folk', 'Folk'],
-  ['funk', 'Funk'],
-  ['hip hop', 'Hip-Hop'],
-  ['house', 'House'],
-  ['indie', 'Indie'],
-  ['jazz', 'Jazz'],
-  ['latin', 'Latin'],
-  ['metal', 'Metal'],
-  ['oldies', 'Oldies'],
-  ['pop', 'Pop'],
-  ['punk', 'Punk'],
-  ['r&b', 'R&B'],
-  ['reggae', 'Reggae'],
-  ['rock', 'Rock'],
-  ['soul', 'Soul'],
-  ['techno', 'Techno'],
-  ['trance', 'Trance'],
-  ['world', 'World'],
-]);
-
-const CATEGORY_MATCHERS = Object.freeze({
-  news: ['news', 'current affairs', 'journalism'],
-  talk: ['talk', 'spoken word', 'interview', 'podcast'],
-  weather: ['weather', 'emergency', 'noaa'],
-  'public-safety': ['public safety', 'scanner', 'police', 'fire', 'ems', 'dispatch', 'emergency'],
-  'aviation-marine': ['aviation', 'air traffic', 'atc', 'airport', 'marine', 'maritime', 'coast guard'],
-  'traffic-transit': ['traffic', 'transit', 'transport', 'rail', 'metro'],
-});
 
 const RADIO_CATEGORY_COLORS = Object.freeze({
   all: '#b9fbff',
@@ -704,50 +669,6 @@ function volumeClock() {
     : Date.now();
 }
 
-/** Normalize one directory tag to a stable, lower-case display token. */
-export function normalizeRadioTag(value) {
-  return String(value ?? '')
-    .trim()
-    .toLocaleLowerCase()
-    .replace(/[_-]+/g, ' ')
-    .replace(/\s+/g, ' ')
-    .slice(0, 80);
-}
-
-function stationTags(station) {
-  if (Array.isArray(station?.tags)) return station.tags.map(normalizeRadioTag).filter(Boolean);
-  return String(station?.tags ?? '')
-    .split(',')
-    .map(normalizeRadioTag)
-    .filter(Boolean);
-}
-
-function hasTag(station, needles) {
-  const tags = stationTags(station);
-  return needles.some((needle) => tags.some((tag) => tag === needle || tag.includes(needle)));
-}
-
-function detectedGenres(station) {
-  return MUSIC_GENRES.filter(([genre]) => hasTag(station, [genre])).map(([genre]) => genre);
-}
-
-/** Return whether a station belongs in a station-tag category. */
-export function stationMatchesRadioCategory(station, categoryId) {
-  if (categoryId === 'all') return true;
-  if (categoryId.startsWith('genre:')) {
-    return detectedGenres(station).includes(categoryId.slice('genre:'.length));
-  }
-  if (categoryId === 'music') {
-    return detectedGenres(station).length > 0
-      || hasTag(station, ['music', 'hits', 'songs']);
-  }
-  if (categoryId === 'other') {
-    return !Object.entries(CATEGORY_MATCHERS).some(([id]) => stationMatchesRadioCategory(station, id))
-      && !stationMatchesRadioCategory(station, 'music');
-  }
-  return hasTag(station, CATEGORY_MATCHERS[categoryId] || []);
-}
-
 /** Return the shared CSS color for a canonical or detected-genre category. */
 export function radioCategoryColor(categoryId = 'other') {
   const normalized = String(categoryId || 'other');
@@ -1144,8 +1065,68 @@ function selectedPresentationStation() {
   return _cancelledTuningPresentationStation || selectedStation();
 }
 
+let _redisName = '';
+let _redisFilterOpen = false;
+let _redisMatchedIds = null;
+let _redisSearchController = null;
+let _redisFormDispose = null;
+
+async function refreshRadioRedisFilter(signal) {
+  if (!redisEnabled() || !_enabled || !_stations.length) return;
+  _redisSearchController?.abort();
+  const controller = _redisSearchController = new AbortController();
+  const combined = AbortSignal.any([controller.signal, ...(signal ? [signal] : [])]);
+  try {
+    const response = await fetch(DIRECTORY_ENDPOINT, {signal:combined, redisReadOnly:true,
+      redisFilter:{name:_redisFilterOpen ? _redisName : '',tag:_filter}});
+    if (!response.ok) throw new Error('Radio Search unavailable');
+    const body = await response.json();
+    combined.throwIfAborted();
+    if (!_enabled) return;
+    _redisMatchedIds = new Set(body.stations.map(station=>station.id));
+    _error = null;
+    resetRadioClusterOverlayIdentities();
+    updateRenderVisibility();
+    if (_dataSource?.clustering) {
+      const points = _dataSource.clustering.clusterPoints;
+      _dataSource.clustering.clusterPoints = !points;
+      _dataSource.clustering.clusterPoints = points;
+    }
+    scheduleRadioOverlayPublish(); emitState();
+  } catch(error) {
+    if (!combined.aborted) { _error = error.message; emitState(); }
+  }
+}
+
+function createRadioRedisFilter(row, changed) {
+  _redisFormDispose?.();
+  const right = row.querySelector('.data-toggle-right');right.classList.add('redis-filter-actions');
+  const toggle = document.createElement('button');toggle.type='button';toggle.className='redis-filter-toggle';toggle.textContent='Filter';
+  toggle.setAttribute('aria-label','Filter radio stations');toggle.setAttribute('aria-controls','redis-radio-filter');right.append(toggle);
+  const form = document.createElement('form');form.id='redis-radio-filter';form.className='redis-filter-form';
+  const nameLabel=document.createElement('label');nameLabel.textContent='Name';
+  const input=document.createElement('input');input.type='text';input.maxLength=120;input.placeholder='Search station…';input.value=_redisName;nameLabel.append(input);
+  const tagLabel=document.createElement('label');tagLabel.textContent='Tag';const select=document.createElement('select');tagLabel.append(select);
+  form.append(nameLabel,tagLabel);row.append(form);
+  const sync = () => {
+    if(!row.isConnected) return;
+    form.hidden=!_redisFilterOpen;row.classList.toggle('redis-filter-open',_redisFilterOpen);
+    toggle.setAttribute('aria-pressed',String(_redisFilterOpen));toggle.setAttribute('aria-expanded',String(_redisFilterOpen));
+    const categories=_categories.some(x=>x.id===_filter) ? _categories : [..._categories,{id:_filter,label:_filter,count:0}];
+    const signature=JSON.stringify(categories.map(x=>[x.id,x.count]));
+    if(select.dataset.options!==signature){select.replaceChildren(...categories.map(category=>{const option=document.createElement('option');option.value=category.id;option.textContent=`${category.label} (${category.count})`;return option;}));select.dataset.options=signature;}
+    input.value=_redisName; select.value=_filter;
+  };
+  input.addEventListener('input',()=>{_redisName=input.value;void refreshRadioRedisFilter();});
+  select.addEventListener('change',()=>setRadioFilter(select.value));
+  toggle.addEventListener('click',()=>{_redisFilterOpen=!_redisFilterOpen;sync();changed();void refreshRadioRedisFilter();if(_redisFilterOpen)input.focus();});
+  form.addEventListener('submit',event=>event.preventDefault());
+  form.hidden=!_redisFilterOpen;
+  _redisFormDispose=subscribeToRadio(sync);queueMicrotask(sync);
+}
+
 function visibleStations() {
-  return filterRadioStations(_stations, _filter);
+  return filterRadioStations(_stations, _filter).filter(station=>!redisEnabled() || !_redisMatchedIds || _redisMatchedIds.has(station.id));
 }
 
 function viewportRadioAnchor() {
@@ -1992,6 +1973,7 @@ export function setRadioParams(params = {}) {
     if (clearedCancelledPresentation) updateSelectionEntity();
     if (filterChanged) resetRadioClusterOverlayIdentities();
     changed ||= filterChanged || clearedCancelledPresentation;
+    if (filterChanged) void refreshRadioRedisFilter();
   }
   if (nextVolume !== null && nextVolume !== _userVolume) {
     _userVolume = nextVolume;
@@ -2157,7 +2139,7 @@ function publishRadioOverlayEntries() {
       .map((entity) => String(entity?.id || '').slice(RADIO_PREFIX.length))
       .filter((id) => {
         const station = _stationById.get(id);
-        return station && stationMatchesRadioCategory(station, _filter);
+        return station && stationMatchesRadioCategory(station, _filter) && (!redisEnabled() || !_redisMatchedIds || _redisMatchedIds.has(station.id));
       })
       .sort();
     if (stationIds.length < 3) continue;
@@ -2360,7 +2342,7 @@ function updateRenderVisibility({ force = true } = {}) {
   const occluder = horizonOccluder(_viewer.camera);
   let visibilityChanged = false;
   for (const [id, record] of _renderById) {
-    const matches = stationMatchesRadioCategory(record.station, _filter);
+    const matches = stationMatchesRadioCategory(record.station, _filter) && (!redisEnabled() || !_redisMatchedIds || _redisMatchedIds.has(record.station.id));
     const visible = matches && occluder.isPointVisible(record.position);
     if (record.entity.show !== visible) visibilityChanged = true;
     record.entity.show = visible;
@@ -2387,6 +2369,7 @@ export function setRadioFilter(categoryId) {
   const clearsCancelledPresentation = Boolean(_cancelledTuningPresentationStation);
   _cancelledTuningPresentationStation = null;
   _filter = nextFilter;
+  if (changed) void refreshRadioRedisFilter();
   if (clearsCancelledPresentation) updateSelectionEntity();
   if (changed) resetRadioClusterOverlayIdentities();
   updateRenderVisibility();
@@ -2631,6 +2614,7 @@ export const radioLayer = {
 
   /** Hide the layer and stop playback without forgetting the selected station. */
   disable() {
+    this.resetRedisFilter();
     _sessionGeneration += 1;
     _enabled = false;
     invalidateRadioCameraNavigation();
@@ -2659,7 +2643,7 @@ export const radioLayer = {
   },
 
   /** Refresh directory metadata through the hardened same-origin broker. */
-  async update() {
+  async update(viewer, {signal} = {}) {
     if (!_enabled) return;
     const generation = ++_requestGeneration;
     const sessionGeneration = _sessionGeneration;
@@ -2669,7 +2653,7 @@ export const radioLayer = {
     _error = null;
     emitState();
     try {
-      const response = await fetch(DIRECTORY_ENDPOINT, { signal: _abortController.signal });
+      const response = await fetch(DIRECTORY_ENDPOINT, { signal: AbortSignal.any([_abortController.signal, ...(signal ? [signal] : [])]), redisUnfiltered:true });
       if (!response.ok) throw new Error(`Radio directory returned ${response.status}`);
       const body = await response.json();
       if (!radioRequestIsCurrent(
@@ -2723,7 +2707,7 @@ export const radioLayer = {
         && Number.isSafeInteger(currentAcceptedGeneration)
         && acceptedGeneration < currentAcceptedGeneration
       ) throw new Error('Radio directory generation regressed');
-      const repeatingAcceptedGeneration = (
+      const repeatingAcceptedGeneration = response.headers?.get('x-gev-progressive') !== '1' && (
         !body.stale
         && !body.degraded
         && Number.isSafeInteger(currentAcceptedGeneration)
@@ -2752,6 +2736,7 @@ export const radioLayer = {
         }
         if (!repeatingAcceptedGeneration) _updatedAt = updatedAt;
       }
+      await refreshRadioRedisFilter(signal);
       _degraded = body.degraded;
       _stale = body.stale;
       _error = preservingWarmCatalog
@@ -2801,6 +2786,7 @@ export const radioLayer = {
     _acceptedCatalogSnapshot = EMPTY_ACCEPTED_CATALOG_SNAPSHOT;
     _stationById.clear();
     _categories = Object.freeze([]);
+    _redisSearchController?.abort(); _redisMatchedIds=null; _redisFormDispose?.();
     _filter = DEFAULT_RADIO_FILTER;
     _renderById.clear();
     resetRadioClusterOverlayIdentities();
@@ -2846,6 +2832,12 @@ export const radioLayer = {
   subscribePlaybackControls: subscribeToRadioPlaybackControls,
   getAcceptedCatalogSnapshot: getRadioAcceptedCatalogSnapshot,
   getUIState: getRadioUIState,
+  resetRedisFilter: () => {
+    _redisSearchController?.abort(); _redisName = ''; _redisFilterOpen = false; _redisMatchedIds = null;
+    _filter = DEFAULT_RADIO_FILTER; emitState();
+  },
+  createRedisFilter: createRadioRedisFilter,
+  refreshRedisFilter: refreshRadioRedisFilter,
   getParams: getRadioParams,
   setParams: setRadioParams,
   getOverlayDiagnostics: () => ({

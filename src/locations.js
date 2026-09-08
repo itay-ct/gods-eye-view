@@ -3,7 +3,7 @@ import { viewportBias, placesNearViewRecovery } from './annotations/annotationRe
 
 /**
  * Points of Interest per city.
- * Each city has 5 POIs; the first is the default fly-to landmark.
+ * The first POI is the default fly-to landmark for each city.
  *
  * Field reference:
  *   alt     — RANGE (distance from target in meters), NOT absolute altitude
@@ -12,6 +12,14 @@ import { viewportBias, placesNearViewRecovery } from './annotations/annotationRe
  *   buildingHeight — estimated height of landmark center above ground (meters)
  */
 export const CITY_POIS = {
+  telaviv: {
+    name: 'Tel Aviv',
+    groundElevation: 30,
+    viewBounds: { southwest: { lat: 32.00, lng: 34.73 }, northeast: { lat: 32.15, lng: 34.85 } },
+    pois: [
+      { name: 'Tel Aviv', lat: 32.0853, lon: 34.7818, alt: 6000, pitch: -45, heading: 0, buildingHeight: 0 },
+    ],
+  },
   austin: {
     name: 'Austin',
     groundElevation: 150, // meters above WGS84 ellipsoid

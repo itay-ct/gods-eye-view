@@ -1,4 +1,4 @@
-import { layerFetch } from './redisMode.js';
+import { layerFetch, redisEnabled } from './redisMode.js';
 const fetch = layerFetch('ais-live-vessels');
 
 import * as Cesium from 'cesium';
@@ -869,7 +869,7 @@ async function fetchLivePositions(viewer, refreshSignal = null) {
     // Combine the layer's teardown-abort with a hard timeout so a hung upstream
     // can't wedge the poll indefinitely (parity with the track fetch + flights).
     const signal = typeof AbortSignal.any === 'function'
-      ? AbortSignal.any([requestController.signal, AbortSignal.timeout(10000), ...(refreshSignal ? [refreshSignal] : [])])
+      ? AbortSignal.any([requestController.signal, AbortSignal.timeout(redisEnabled() ? 75000 : 10000), ...(refreshSignal ? [refreshSignal] : [])])
       : requestController.signal;
     const response = await fetch(url, {
       signal,

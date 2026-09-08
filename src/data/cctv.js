@@ -1,4 +1,4 @@
-import { layerFetch, projectLocalRecords } from './redisMode.js';
+import { redisLayerViewReadOnly, layerFetch, projectLocalRecords } from './redisMode.js';
 const fetch = layerFetch('cctv');
 
 /**
@@ -4165,66 +4165,7 @@ async function syncHealthState(force = false) {
  * Manages camera catalog, coverage visualization, the far-cap projection
  * plane, health sync, calibration, and auto-hop.
  */
-const cctvLayer = {
-  id: 'cctv',
-  name: 'CCTV',
-  icon: '📹',
-  source: 'CCTV + Street View fallback',
-  updateInterval: DEFAULT_UPDATE_INTERVAL_MS,
-
-  /**
-   * Initializes the CCTV layer: loads camera sources, builds the catalog,
-   * restores calibration from localStorage, creates billboards, sets up click
-   * handling, and performs initial health sync. Coverage entities stay lazy.
-   * @param {Cesium.Viewer} viewer - The Cesium viewer instance.
-   */
-  async init(viewer) {
-    _viewer = viewer;
-    clearRuntimeState();
-    _enabled = false;
-    _activeCameraId = null;
-    _autoHopSuspended = false;
-    _lastHopAt = 0;
-    _lastViewContext = '';
-    _calibrationById = loadCalibrationStore();
-
-    _billboards = new Cesium.BillboardCollection();
-    _viewer.scene.primitives.add(_billboards);
-    registerSpriteCollection('cctv', _billboards);
-
-    const sources = await loadCameraSources();
-    const catalogFromSources = buildCatalogFromSources(sources);
-    const catalog = catalogFromSources.length ? catalogFromSources : await projectLocalRecords('cctv', seedCatalog());
-
-    // Viewshed color identity (design §3a): golden-angle hue over the
-    // id-SORTED catalog index — deterministic across sessions for a stable
-    // catalog, maximally separated for neighboring cameras.
-    const hueIndexById = new Map(
-      catalog.map((camera) => camera.id).sort().map((id, index) => [id, index])
-    );
-
-    for (const camera of catalog) {
-      const savedEntry = _calibrationById.get(camera.id);
-      if (savedEntry) {
-        camera.calibration = normalizeCalibration(savedEntry.values);
-        camera.calSource = savedEntry.source;
-      }
-      ensureCameraPose(camera);
-    }
-
-    // Task 5 (height-datum fix): batch ALL camera coords through the Re:Earth
-    // ellipsoidal ground-prior resolver (network-cached — NOT a scene query;
-    // the catalog's orthometric groundElevationM feeds the geoid fallback
-    // chain). Bounded wait: a warm proxy cache resolves in milliseconds, so
-    // records are normally built WITH their prior (correct first paint in
-    // every regime); a cold/slow upstream loses the race and the batch
-    // applies post-hoc via applyLateGroundPriors instead of hanging init.
-    const priorsPromise = resolveGroundPriors(catalog);
-    const priors = await Promise.race([
-      priorsPromise,
-      new Promise((resolve) => setTimeout(() => resolve(null), GROUND_PRIOR_INIT_WAIT_MS)),
-    ]);
-
+function appendCameraRecords(catalog, priors, hueIndexById) {
     for (let i = 0; i < catalog.length; i++) {
       const camera = catalog[i];
       // Ellipsoidal ground prior (or null while the batch is still in
@@ -4298,6 +4239,70 @@ const cctvLayer = {
       _records.push(record);
       _recordById.set(camera.id, record);
     }
+
+}
+
+const cctvLayer = {
+  id: 'cctv',
+  name: 'CCTV',
+  icon: '📹',
+  source: 'CCTV + Street View fallback',
+  updateInterval: DEFAULT_UPDATE_INTERVAL_MS,
+
+  /**
+   * Initializes the CCTV layer: loads camera sources, builds the catalog,
+   * restores calibration from localStorage, creates billboards, sets up click
+   * handling, and performs initial health sync. Coverage entities stay lazy.
+   * @param {Cesium.Viewer} viewer - The Cesium viewer instance.
+   */
+  async init(viewer) {
+    _viewer = viewer;
+    clearRuntimeState();
+    _enabled = false;
+    _activeCameraId = null;
+    _autoHopSuspended = false;
+    _lastHopAt = 0;
+    _lastViewContext = '';
+    _calibrationById = loadCalibrationStore();
+
+    _billboards = new Cesium.BillboardCollection();
+    _viewer.scene.primitives.add(_billboards);
+    registerSpriteCollection('cctv', _billboards);
+
+    const sources = await loadCameraSources();
+    const catalogFromSources = buildCatalogFromSources(sources);
+    const catalog = catalogFromSources.length ? catalogFromSources : await projectLocalRecords('cctv', seedCatalog());
+
+    // Viewshed color identity (design §3a): golden-angle hue over the
+    // id-SORTED catalog index — deterministic across sessions for a stable
+    // catalog, maximally separated for neighboring cameras.
+    const hueIndexById = new Map(
+      catalog.map((camera) => camera.id).sort().map((id, index) => [id, index])
+    );
+
+    for (const camera of catalog) {
+      const savedEntry = _calibrationById.get(camera.id);
+      if (savedEntry) {
+        camera.calibration = normalizeCalibration(savedEntry.values);
+        camera.calSource = savedEntry.source;
+      }
+      ensureCameraPose(camera);
+    }
+
+    // Task 5 (height-datum fix): batch ALL camera coords through the Re:Earth
+    // ellipsoidal ground-prior resolver (network-cached — NOT a scene query;
+    // the catalog's orthometric groundElevationM feeds the geoid fallback
+    // chain). Bounded wait: a warm proxy cache resolves in milliseconds, so
+    // records are normally built WITH their prior (correct first paint in
+    // every regime); a cold/slow upstream loses the race and the batch
+    // applies post-hoc via applyLateGroundPriors instead of hanging init.
+    const priorsPromise = resolveGroundPriors(catalog);
+    const priors = await Promise.race([
+      priorsPromise,
+      new Promise((resolve) => setTimeout(() => resolve(null), GROUND_PRIOR_INIT_WAIT_MS)),
+    ]);
+
+    appendCameraRecords(catalog, priors, hueIndexById);
 
     _count = _records.length;
     if (_records.length > 0) {
@@ -4476,6 +4481,24 @@ const cctvLayer = {
    */
   async update() {
     if (!_enabled) return;
+    if (redisLayerViewReadOnly('cctv')) {
+      const catalog = buildCatalogFromSources(await loadCameraSources());
+      if (!_enabled) return;
+      const added = catalog.filter(camera => !_recordById.has(camera.id));
+      const hues = new Map(catalog.map(camera=>camera.id).sort().map((id,i)=>[id,i]));
+      for (const camera of added) {
+        const saved = _calibrationById.get(camera.id);
+        if (saved) {camera.calibration=normalizeCalibration(saved.values);camera.calSource=saved.source;}
+        ensureCameraPose(camera);
+      }
+      appendCameraRecords(added, null, hues);
+      const records = added.map(camera=>_recordById.get(camera.id));
+      _count = _records.length;
+      if (records.length) {
+        enqueueGeometryRefresh(records);
+        void resolveGroundPriors(added).then(priors=>applyLateGroundPriors(records,priors)).catch(()=>{});
+      }
+    }
     const now = Date.now();
     _lastUpdate = now;
     if (!_tilesReadyReenqueued && projectionTilesReady()) {

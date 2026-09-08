@@ -16,9 +16,10 @@ Enabled layer → existing source adapter → Redis Stream → consumer group
 Redis Search → indexes and queries the individual entity JSON documents
 ```
 
-**Current Search scope:** flights and satellites have automatic `ON JSON` indexes and inline filters
-that read through `FT.SEARCH`. Flights filter by label and aircraft type name; satellites by name and category. Other layers expose indexable entity fields; see the
-[Search examples](server/redis/README.md#redis-search-readiness). `FT.AGGREGATE` UI is not implemented yet.
+**Current Search scope:** civilian and military flights, satellites, datacenters, live AIS vessels, and radio stations have
+automatic `ON JSON` indexes and inline filters that read through `FT.SEARCH`. Civilian/military flight types and datacenter
+operators use `FT.AGGREGATE` for ranked dropdown counts. See the
+[Search examples](server/redis/README.md#redis-search-readiness).
 
 ## What this fork adds
 
@@ -26,18 +27,23 @@ that read through `FT.SEARCH`. Flights filter by label and aircraft type name; s
 | --- | --- |
 | **Redis / No Redis toggle** | Added above Data Layers. No Redis uses original GEV fetching; Redis routes all 15 pane layers through the pipeline. The choice is per browser tab. |
 | **Streams and consumer groups** | One Stream per layer, projected by the `view-projector` group. Source adapters and their caching remain in use. |
+| **Bounded Redis work** | Publication scripts handle at most 25 entities, with one indexed JSON write per entity. Pipelined reads verify publication revisions; resumable checkpoints preserve CMS counts after a worker restart. |
 | **Individual entity documents** | One native RedisJSON document per object, with named fields such as ID, label, location, altitude, and speed, plus nested source data. No giant collection hash of serialized objects. |
 | **Search-ready storage** | Stable entity-key prefixes and native JSON fields support Redis Search indexes and queries. Real Search integration tests verify indexing. |
 | **Satellite filtering** | Redis-only Filter button beneath the satellite toggle opens inline Name/Type fields. Each edit immediately queries Redis Search; Filter off restores the full catalog. TLE names, catalog types, orbital elements, and a dated SGP4 position are exposed as native JSON fields. |
 | **Flight enrichment and filtering** | Stream consumers merge aircraft type, model name and registration into the flight JSON and preserve them across position updates. Automatic Label/Type filtering uses Redis Search; the combo lists the 20 most common types matching the label, ranked with Redis aggregation. Cached aircraft remain visible during regional fallback. |
+| **Military filtering** | Inline Label/Type filters query Redis Search. Type uses the provider aircraft designator (such as C17); the dropdown ranks the 20 most common types matching the label. |
+| **Filter reset** | Turning a layer OFF clears and closes its filters, including Radio’s shared tag selection. |
+| **More layers** | CCTV, Street Traffic, Bikeshare, Mapped Installations, FIRMS Active Fires, and Space Missions sit at the bottom under a collapsed More toggle. |
 | **Datacenter filtering** | Redis Search powers automatic inline Name and Operator filters; the operator dropdown ranks the top 20 by name-matched count. |
 | **Live AIS filtering** | Redis Search powers an automatic inline vessel Label filter, including immediate removal of excluded selections and trails. |
+| **Radio filtering** | Inline Name and Tag filters use Redis Search. Tag shares the existing radio panel's selection and category rules; disabling Filter removes the name restriction and retains that tag. |
 | **Count-Min Sketch** | One shared sketch per layer counts every projected source record by entity ID, including identical values. Focused labels query the sketch and show an approximate update count. |
-| **Redis-backed view reads** | Ingestion returns a receipt; the browser separately reads a snapshot assembled from Redis entities. Successful map-data responses do not fall back to direct sources. |
+| **Progressive Redis views** | Cached Redis objects display immediately while ingestion continues in the background. Cold layers display completed projection batches before the full catalogue finishes. All successful map-data responses read Redis entities. |
 | **Compact snapshots** | Small native JSON metadata and an ordered Redis List of entity keys preserve GEV's response format. Shared membership is inside entity JSON, with no separate owner sets. |
 | **Stream statistics** | Layer text uses `XINFO STREAM` lifetime `entries-added` and `last-generated-id`, with pending/lag details and exact values on hover. |
-| **Bounded retention** | A 10,000-entry target per Stream uses acknowledged-only trimming; unprocessed entries are protected and intake pauses when the backlog grows too large. |
-| **Failure and flush recovery** | A warning below the toggle reports failures. Missing Streams, groups, and sketches are rebuilt after a manual flush. The browser reloads its current view to repopulate layers; interrupted requests retry once through Redis. |
+| **Bounded retention** | Flights and Live AIS target 100,000 Stream entries; other layers target 10,000. Acknowledged-only trimming protects unprocessed entries, and intake pauses when the backlog grows too large. |
+| **Failure and flush recovery** | A clickable warning distinguishes source and Redis failures and retries enabled layers. Transient recovery preserves the view; database resets reload it to repopulate layers. Missing Streams, groups, and sketches are rebuilt after a flush. |
 | **Layer-aware ingestion** | OFF blocks new ingestion and cancels pending browser/server work, including background helper requests. Already accepted events may finish processing. Turning ON resumes intake. |
 
 Existing entities and history remain subject to their retention after a layer is switched off. Another tab
@@ -63,11 +69,11 @@ npm run dev -- --host 127.0.0.1 --port 4173 --strictPort
 
 Open [the local demo](http://127.0.0.1:4173), expand **Data Layers**, select **Redis**, and enable a layer.
 For a previously created container, use `docker start gev-redis`. Optional server settings are `REDIS_URL`
-(default `redis://127.0.0.1:6379`) and `REDIS_STREAM_MAXLEN` (default `10000`). Configure provider keys locally
+(default `redis://127.0.0.1:6379`) and `REDIS_STREAM_MAXLEN` (default `10000` for other layers; Flights and Live AIS use `100000`). Configure provider keys locally
 using GEV's original setup; `.env` and credentials are not included in this repository.
 
 This integration currently runs through the **Vite development server**. Recording/offline replay, Pub/Sub
-browser notifications, a Redis query UI, and a separate production Redis server adapter are future work.
+browser notifications, a general Redis query console, and a separate production Redis server adapter are future work.
 
 See the [Redis implementation guide](server/redis/README.md) for the key model, Search example, retention,
 recovery, and test commands. [demo-implementation.md](demo-implementation.md) is a preserved earlier planning

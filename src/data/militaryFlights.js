@@ -1,4 +1,4 @@
-import { layerFetch } from './redisMode.js';
+import { layerFetch, redisLayerViewReadOnly } from './redisMode.js';
 const fetch = layerFetch('military');
 
 import * as Cesium from 'cesium';
@@ -2776,7 +2776,7 @@ const militaryFlightsLayer = {
       ids: new Set(),
       source: 'adsb.lol',
     };
-    if (_retryAt && nowMs < _retryAt) {
+    if (_retryAt && nowMs < _retryAt && !redisLayerViewReadOnly('military')) {
       _backoff = true;
       return;
     }
@@ -3178,7 +3178,7 @@ const militaryFlightsLayer = {
         if (currentIcaos.has(icao24)) continue;
         const misses = (_missingPolls.get(icao24) || 0) + 1;
         const limit = _likelyLanded(icao24) ? LANDED_MISSING_POLL_LIMIT : MISSING_POLL_LIMIT;
-        if (misses < limit) {
+        if (misses < limit && response.headers?.get('x-gev-filtered') !== '1') {
           _missingPolls.set(icao24, misses);
           if (icao24 === _trackedIcao && _trackedEntity) {
             // Honest readout: the tracked plane has no faded billboard (its

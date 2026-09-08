@@ -129,7 +129,11 @@ export async function fetchFlowForBounds(bounds, { signal, zoom = 12 } = {}) {
   if (tiles.length === 0) return [];
   const now = Date.now();
 
-  const results = await Promise.allSettled(tiles.map(async ({ z, x, y }) => {
+  // A city can cover 64 tiles. Bound network, Redis projection, and decode
+  // work so a traffic refresh cannot flood the shared server alongside CCTV.
+  const results = new Array(tiles.length);
+  let next = 0;
+  const loadTile = async ({z, x, y}) => {
     const key = `${z}/${x}/${y}`;
     const cached = _decodeCache.get(key);
     if (cached && now - cached.at < DECODE_CACHE_TTL_MS) return cached.segments;
@@ -140,7 +144,16 @@ export async function fetchFlowForBounds(bounds, { signal, zoom = 12 } = {}) {
     const segments = decodeFlowTile(await res.arrayBuffer(), z, x, y);
     cacheSet(key, { at: Date.now(), segments });
     return segments;
+  };
+  await Promise.all(Array.from({length: Math.min(4, tiles.length)}, async () => {
+    while (next < tiles.length) {
+      signal?.throwIfAborted();
+      const index = next++;
+      try { results[index] = {status:'fulfilled', value:await loadTile(tiles[index])}; }
+      catch (reason) { results[index] = {status:'rejected', reason}; }
+    }
   }));
+  signal?.throwIfAborted();
 
   const fulfilled = results.filter((r) => r.status === 'fulfilled');
   if (fulfilled.length === 0) {
