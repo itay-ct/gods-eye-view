@@ -1641,3 +1641,16 @@ test('a vessel analyst record carries the MMSI the tracker keys on', () => {
   assert.equal(nameless.id, '366999124');
   assert.equal(nameless.mmsi, '366999124');
 });
+
+test('filtered zero matches clear warm selected vessels and trails immediately', () => {
+ const priorDocument=globalThis.document;globalThis.document={getElementById:()=>null};
+ const record=makeRecord();const trail=makeTrailSpy();
+ _setVesselStateForTest({viewer:{},records:[record],selectedRecord:record,trail,trailMmsi:record.mmsi,loaded:true});
+ try{
+  const result=_applyAisFeedSnapshotForTest({}, {status:'open',lastMessageAt:123,rows:[]},true);
+  assert.equal(result.reconciled,true);
+  assert.equal(_getVesselFeedStateForTest().count,0);
+  assert.equal(_getVesselFeedStateForTest().error,null);
+  assert.equal(_getVesselFeedStateForTest().selectedMmsi,null);
+ }finally{_setVesselStateForTest();globalThis.document=priorDocument;}
+});

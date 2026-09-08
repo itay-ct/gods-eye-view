@@ -2,10 +2,16 @@ import { SATELLITE_CLASSES, SATELLITE_CLASS_ORDER } from './satelliteClass.js';
 
 const states = {
   satellites: {open: false, applied: null, draft: {name: '', type: ''}},
+  'local-datacenters': {open:false, applied:null, draft:{name:'', operator:''}},
+  'ais-live-vessels': {open:false, applied:null, draft:{label:''}},
   flights: {open: false, applied: null, draft: {label: '', typeName: ''}},
 };
-let refreshTypes = null;
-export const refreshFlightFilterOptions = () => refreshTypes?.();
+const optionRefreshers = new Map();
+export const refreshFlightFilterOptions = () => Promise.all([...optionRefreshers.values()].map(refresh => refresh()));
+export const datacenterFilter = () => states['local-datacenters'].applied;
+export const datacenterFilterOpen = () => states['local-datacenters'].open;
+export const aisFilter = () => states['ais-live-vessels'].applied;
+export const aisFilterOpen = () => states['ais-live-vessels'].open;
 export const flightFilter = () => states.flights.applied;
 export const flightFilterOpen = () => states.flights.open;
 
@@ -16,8 +22,11 @@ export const satelliteFilterOpen = () => states.satellites.open;
 export function createRedisLayerFilter(row, { refresh, enabled, changed = () => {}, layerId = 'satellites', loadTypes = null }) {
   const state = states[layerId];
   const draft = state.draft;
-  const nameField = layerId === 'flights' ? 'label' : 'name';
-  const typeField = layerId === 'flights' ? 'typeName' : 'type';
+  const labelOnly = layerId === 'ais-live-vessels';
+  const nameField = (labelOnly || layerId === 'flights') ? 'label' : 'name';
+  const isDatacenter = layerId === 'local-datacenters';
+  const allText = isDatacenter ? 'All operators' : 'All types';
+  const typeField = isDatacenter ? 'operator' : layerId === 'flights' ? 'typeName' : 'type';
   let request = null;
   const right = row.querySelector('.data-toggle-right');
   right.classList.add('redis-filter-actions');
@@ -32,29 +41,30 @@ export function createRedisLayerFilter(row, { refresh, enabled, changed = () => 
   const form = document.createElement('form');
   form.id = `redis-${layerId}-filter`;
   form.className = 'redis-filter-form';
-  for (const field of [nameField, typeField]) {
+  if (labelOnly) form.classList.add('redis-filter-single');
+  for (const field of (labelOnly ? [nameField] : [nameField, typeField])) {
     const label = document.createElement('label');
-    label.textContent = field === nameField ? (layerId === 'flights' ? 'Label' : 'Name') : 'Type';
+    label.textContent = field === nameField ? (labelOnly || layerId === 'flights' ? 'Label' : 'Name') : isDatacenter ? 'Operator' : 'Type';
     const input = document.createElement(field === typeField ? 'select' : 'input');
     input.name = field;
     if (field === typeField) {
       for (const value of ['', ...(loadTypes ? [] : SATELLITE_CLASS_ORDER.map(key => SATELLITE_CLASSES[key].label))]) {
         const option = document.createElement('option');
         option.value = value;
-        option.textContent = value || 'All types';
+        option.textContent = value || allText;
         input.append(option);
       }
     } else {
       input.type = 'text';
       input.maxLength = 120;
-      input.placeholder = layerId === 'flights' ? 'VLG, BAW…' : 'ISS, STAR…';
+      input.placeholder = labelOnly ? 'Search vessel…' : isDatacenter ? 'Search name…' : layerId === 'flights' ? 'VLG, BAW…' : 'ISS, STAR…';
       input.autocomplete = 'off';
     }
     input.value = draft[field];
     input.addEventListener('input', () => {
       draft[field] = input.value;
       input.title = input.value;
-      state.applied = { [nameField]: draft[nameField].trim(), [typeField]: draft[typeField].trim() };
+      state.applied = { [nameField]: draft[nameField].trim(), ...(labelOnly ? {} : {[typeField]: draft[typeField].trim()}) };
       void run();
       if (loadTypes && field === nameField) void refreshOptions();
     });
@@ -91,7 +101,7 @@ export function createRedisLayerFilter(row, { refresh, enabled, changed = () => 
   toggle.addEventListener('click', async () => {
     state.open = !state.open;
     const needsRefresh = state.open || state.applied !== null;
-    state.applied = state.open ? { [nameField]: draft[nameField].trim(), [typeField]: draft[typeField].trim() } : null;
+    state.applied = state.open ? { [nameField]: draft[nameField].trim(), ...(labelOnly ? {} : {[typeField]: draft[typeField].trim()}) } : null;
     sync();
     if (state.open) void refreshOptions();
     if (state.open) form.querySelector('input').focus();
@@ -106,23 +116,23 @@ export function createRedisLayerFilter(row, { refresh, enabled, changed = () => 
       const {types, total, typed} = await loadTypes(label);
       if (currentOptions !== optionsRequest || label !== draft[nameField].trim() || !enabled() || !state.open || !row.isConnected) return;
       const select = form.querySelector('select');
-      const allLabel = `All types (${total.toLocaleString()} · ${typed.toLocaleString()} known)`;
+      const allLabel = `${allText} (${total.toLocaleString()} · ${typed.toLocaleString()} known)`;
       const values = ['', ...types.map(type => type.name)];
       const counts = new Map(types.map(type => [type.name, type.count]));
       if (draft[typeField] && !values.includes(draft[typeField])) values.push(draft[typeField]);
       if (JSON.stringify([...select.options].map(option => option.textContent)) !== JSON.stringify(values.map(value => value ? `${value} (${counts.get(value) ?? 0})` : allLabel))) {
         select.replaceChildren(...values.map(value => {
           const option = document.createElement('option');
-          option.value = value; option.textContent = value ? `${value} (${counts.get(value) ?? 0})` : allLabel; option.title = value || `${typed.toLocaleString()} of ${total.toLocaleString()} matching aircraft have type information; the rest are included in All types.`;
+          option.value = value; option.textContent = value ? `${value} (${counts.get(value) ?? 0})` : allLabel; option.title = value || `${typed.toLocaleString()} of ${total.toLocaleString()} matching ${isDatacenter ? 'datacenters have operator' : 'aircraft have type'} information; the rest are included in ${allText}.`;
           return option;
         }));
         select.value = draft[typeField];
         select.title = select.value;
       }
-    } catch { if (currentOptions === optionsRequest && enabled() && state.open) status.textContent = '⚠ Type names unavailable'; }
+    } catch { if (currentOptions === optionsRequest && enabled() && state.open) status.textContent = isDatacenter ? '⚠ Operators unavailable' : '⚠ Type names unavailable'; }
 
   };
-  if (loadTypes) refreshTypes = refreshOptions;
+  if (loadTypes) optionRefreshers.set(layerId, refreshOptions);
   form.addEventListener('submit', event => event.preventDefault());
   sync();
 }

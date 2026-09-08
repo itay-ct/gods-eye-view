@@ -104,6 +104,28 @@ FT.SEARCH gev:flights:idx '@kind:{states} @label:(VLG*)' LIMIT 0 100
 Reload the demo once to populate previously unmerged type lookups through the new projector. No database flush
 is required. Type details retain the existing one-hour entity lifetime; a lookup does not invent a position.
 
+### Live AIS Vessels
+
+With Redis and Live AIS Vessels ON, **Filter** shows one inline **Label** text input.
+Edits immediately run word-prefix `FT.SEARCH` against the per-vessel JSON `label`
+field in `gev:ais-live-vessels:idx`. Filter refreshes read the current Redis snapshot
+without ingesting again; normal AIS polling continues through Streams. Filtered-out
+selected vessels and their trails are removed immediately, including zero matches.
+Turning Filter off restores the snapshot; AIS track requests remain unfiltered.
+
+### Datacenters
+
+With Redis and Datacenters ON, **Filter** shows inline **Name** and **Operator** controls.
+Name uses word-prefix `FT.SEARCH`; Operator is an exact, case-insensitive TAG filter.
+The JSON index `gev:local-datacenters:idx` reads `source.properties.tags.name` and
+`source.properties.tags.operator`, so existing documents need no migration.
+The dropdown shows the top 20 operators by matching name count, using `FT.AGGREGATE`;
+capitalization variants are combined to agree with Search matches. Counts refresh with
+an empty name too. Unknown operators remain included under All operators.
+Filter edits read Redis snapshots without ingesting again. Nonmatching map entities and
+labels are hidden; disabling Filter restores the full catalogue. Controls are hidden
+when Redis or the layer is OFF.
+
 ### Satellites
 
 Satellites automatically create `gev:satellites:idx` on the individual JSON documents:

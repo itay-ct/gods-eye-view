@@ -1,3 +1,5 @@
+import {ensureAisIndex, aisQuery} from './aisSearch.js';
+import {ensureDatacenterIndex, datacenterQuery, datacenterOperators} from './datacenterSearch.js';
 import { createClient } from 'redis';
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -209,6 +211,8 @@ export class RedisPipeline {
     const client = await this.connect();
     const keys = this.keys(layer);
     if (layer === 'satellites') await ensureSatelliteIndex(client, this.prefix);
+    if (layer === 'ais-live-vessels') await ensureAisIndex(client, this.prefix);
+    if (layer === 'local-datacenters') await ensureDatacenterIndex(client, this.prefix);
     if (layer === 'flights') await ensureFlightIndex(client, this.prefix);
     const previous = this.layers.get(layer);
     if (previous) await previous.ready.catch(() => {});
@@ -385,11 +389,11 @@ export class RedisPipeline {
   async snapshot(layer, cohort, token = null, filter = null) {
     const client = await this.connect();
     const { base } = this.keys(layer);
-    if (filter && !['satellites', 'flights'].includes(layer)) throw new Error('Unsupported filter layer');
+    if (filter && !['satellites', 'flights', 'local-datacenters', 'ais-live-vessels'].includes(layer)) throw new Error('Unsupported filter layer');
     const flightView = layer === 'flights' && /\/api\/opensky(?:\?|$)/.test(JSON.parse(await client.sendCommand(['JSON.GET', `${base}:snapshot:${cohort}`]) || '{}').source || '');
-    const terms = flightView ? flightQuery(filter || {}) : filter ? satelliteQuery(filter) : '';
+    const terms = flightView ? flightQuery(filter || {}) : filter ? (layer === 'ais-live-vessels' ? aisQuery(filter) : layer === 'local-datacenters' ? datacenterQuery(filter) : satelliteQuery(filter)) : '';
     const query = flightView ? terms : filter ? `${terms === '*' ? '' : `(${terms}) `}@collections:{${cohort.replace(/[^\w]/g, '\\$&')}}` : '';
-    const index = (filter || flightView) ? await (layer === 'flights' ? ensureFlightIndex : ensureSatelliteIndex)(client, this.prefix) : '';
+    const index = (filter || flightView) ? await (layer === 'flights' ? ensureFlightIndex : layer === 'ais-live-vessels' ? ensureAisIndex : layer === 'local-datacenters' ? ensureDatacenterIndex : ensureSatelliteIndex)(client, this.prefix) : '';
     // Read the metadata, ordered references and entity sources atomically.
     const result = await client.eval(`
       local metadata = redis.call('JSON.GET', KEYS[1])
@@ -439,6 +443,8 @@ export class RedisPipeline {
       }
       for (let i = 0; i < documents.length; i++) result[i + 1] = JSON.stringify(documents[i].source);
     }
+    if (filter && layer === 'ais-live-vessels') return Buffer.from(JSON.stringify({...metadata.template, rows:result.slice(1).map(JSON.parse)}));
+    if (filter && layer === 'local-datacenters') return Buffer.from(result.slice(1).join('\n'));
     if (filter) {
       if (metadata.encoding !== 'tle') throw new Error('Satellite snapshot is not TLE');
       return Buffer.from(result.slice(1).map(source => JSON.parse(source).text).join(''));
@@ -449,6 +455,8 @@ export class RedisPipeline {
     }))};
     return unpackBody(manifest, Object.fromEntries(result.slice(1).map((source, i) => [String(i), source])));
   }
+
+  async datacenterOperators(name = '') { return datacenterOperators(await this.connect(), this.prefix, name); }
 
   async flightTypeSummary(label = '') { return flightTypeSummary(await this.connect(), this.prefix, label); }
 

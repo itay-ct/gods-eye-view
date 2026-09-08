@@ -402,9 +402,9 @@ const aisLiveVesselsLayer = {
     state.loadingLabel = '';
   },
 
-  update(viewer) {
+  update(viewer, {signal} = {}) {
     if (!state.enabled) return Promise.resolve();
-    return loadLivePositions(viewer || state.viewer);
+    return loadLivePositions(viewer || state.viewer, signal);
   },
 
   destroy(viewer) {
@@ -838,7 +838,25 @@ function markAisUnavailable(reason) {
   state.stale = state.count > 0;
 }
 
-async function loadLivePositions(viewer) {
+let activePositionLoad = null;
+let activePositionSession = null;
+function loadLivePositions(viewer, refreshSignal = null) {
+  if (activePositionLoad && activePositionSession === state.sessionId) {
+    if (!refreshSignal) return activePositionLoad;
+    state.abort?.abort();
+    return activePositionLoad.catch(() => {}).then(() => {
+      refreshSignal.throwIfAborted();
+      return loadLivePositions(viewer, refreshSignal);
+    });
+  }
+  const job = fetchLivePositions(viewer, refreshSignal);
+  const tracked = job.finally(() => { if (activePositionLoad === tracked) activePositionLoad = null; });
+  activePositionLoad = tracked;
+  activePositionSession = state.sessionId;
+  return tracked;
+}
+
+async function fetchLivePositions(viewer, refreshSignal = null) {
   if (!viewer || state.loading) return;
   state.loading = true;
   state.loadingLabel = state.loaded ? 'refreshing...' : 'loading...';
@@ -851,7 +869,7 @@ async function loadLivePositions(viewer) {
     // Combine the layer's teardown-abort with a hard timeout so a hung upstream
     // can't wedge the poll indefinitely (parity with the track fetch + flights).
     const signal = typeof AbortSignal.any === 'function'
-      ? AbortSignal.any([requestController.signal, AbortSignal.timeout(10000)])
+      ? AbortSignal.any([requestController.signal, AbortSignal.timeout(10000), ...(refreshSignal ? [refreshSignal] : [])])
       : requestController.signal;
     const response = await fetch(url, {
       signal,
@@ -873,7 +891,7 @@ async function loadLivePositions(viewer) {
 
     const payload = await response.json();
     if (!ownsAisRequest(requestController, requestSessionId)) return;
-    applyAisFeedSnapshot(viewer, payload);
+    applyAisFeedSnapshot(viewer, payload, response.headers?.get?.('x-gev-filtered') === '1');
   } catch (error) {
     if (ownsAisRequest(requestController, requestSessionId) && error?.name !== 'AbortError') {
       markAisUnavailable(error?.message || 'AIS live load failed');
@@ -899,7 +917,7 @@ function ownsAisRequest(controller, sessionId) {
 }
 
 /** Apply a classified snapshot while preserving warm state on zero accepted rows. */
-function applyAisFeedSnapshot(viewer, payload) {
+function applyAisFeedSnapshot(viewer, payload, filtered = false) {
   const snapshot = classifyAisFeedSnapshot(payload);
   state.loaded = true;
   state.loadingLabel = '';
@@ -909,7 +927,7 @@ function applyAisFeedSnapshot(viewer, payload) {
   state.rawRowCount = snapshot.rawRowCount;
   state.acceptedRowCount = snapshot.acceptedRowCount;
 
-  if (snapshot.acceptedRowCount === 0) {
+  if (snapshot.acceptedRowCount === 0 && !filtered) {
     state.count = state.vesselRecords.length;
     state.stale = state.count > 0 || Boolean(payload?.refreshing);
     if (isDefinitiveTransportFailure(snapshot.transportStatus)) {
@@ -933,14 +951,14 @@ function applyAisFeedSnapshot(viewer, payload) {
   }
 
   settleFirstConnectPhase('ready');
-  reconcileVessels(viewer, snapshot.acceptedRows);
+  reconcileVessels(viewer, snapshot.acceptedRows, filtered);
   state.count = state.vesselRecords.length;
   state.stale = Boolean(payload?.refreshing);
   state.newestPositionAt = payload?.newestPositionAt || null;
   // Not unconditionally null: a degraded feed keeps its reason even though the
   // cached vessels are still drawable, so the chip cannot go quiet on an
   // outage the user is still looking at.
-  state.error = snapshot.error;
+  state.error = filtered ? deriveAisFeedError(payload, Math.max(1, snapshot.acceptedRowCount)) : snapshot.error;
   state.lastUpdate = _aisRuntime.now();
   return { reconciled: true, ...snapshot };
 }
@@ -988,7 +1006,7 @@ function ensureCollections(viewer) {
  * @param {Cesium.Viewer} viewer - The Cesium viewer instance.
  * @param {Array<Object>} rows - Raw AIS rows from the live API.
  */
-function reconcileVessels(viewer, rows) {
+function reconcileVessels(viewer, rows, filtered = false) {
   ensureCollections(viewer);
 
   // Unkeyed (no-MMSI) records cannot be diffed — drop and rebuild them.
@@ -1025,7 +1043,7 @@ function reconcileVessels(viewer, rows) {
     if (seen.has(mmsi)) continue;
     if (record === state.selectedRecord) {
       record.missedRefreshes = (record.missedRefreshes || 0) + 1;
-      if (record.missedRefreshes <= SELECTED_PIN_REFRESHES) {
+      if (!filtered && record.missedRefreshes <= SELECTED_PIN_REFRESHES) {
         updateSelectedVesselHud(record); // re-render with STALE marker
         continue;
       }
@@ -2046,8 +2064,8 @@ export function _reconcileVesselsForTest(viewer, rows) {
 }
 
 /** Apply one server snapshot through the production pre-reconcile health gate. */
-export function _applyAisFeedSnapshotForTest(viewer, payload) {
-  return applyAisFeedSnapshot(viewer, payload);
+export function _applyAisFeedSnapshotForTest(viewer, payload, filtered = false) {
+  return applyAisFeedSnapshot(viewer, payload, filtered);
 }
 
 /** Exercise the request-owned live loader with a test-controlled fetch. */

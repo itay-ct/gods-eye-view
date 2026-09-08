@@ -1,3 +1,5 @@
+import {aisQuery} from './aisSearch.js';
+import {datacenterQuery} from './datacenterSearch.js';
 import { RedisPipeline } from './pipeline.js';
 import { digest, packBody } from './payload.js';
 import { satelliteQuery } from './satelliteSearch.js';
@@ -83,6 +85,12 @@ export function redisLayersPlugin({pipelineOptions} = {}) {
             errors.delete(`${layer}:${route}`);
             return json(res, 200, result);
           }
+          if (route === '/datacenter-operators' && req.method === 'GET') {
+            requestLayer = 'local-datacenters';
+            const summary = await pipeline.datacenterOperators(new URL(req.url, 'http://localhost').searchParams.get('name') || '');
+            errors.delete(`${requestLayer}:${route}`);
+            return json(res, 200, summary);
+          }
           if (route === '/flight-types' && req.method === 'GET') {
             requestLayer = 'flights';
             const summary = await pipeline.flightTypeSummary(new URL(req.url, 'http://localhost').searchParams.get('label') || '');
@@ -97,10 +105,10 @@ export function redisLayersPlugin({pipelineOptions} = {}) {
             requestLayer = layer;
             const filter = query.get('filter') === '1' ? (layer === 'flights'
               ? {label: query.get('label') || '', typeName: query.get('typeName') || ''}
-              : { name: query.get('name') || '', type: query.get('type') || '' }) : null;
+              : layer === 'ais-live-vessels' ? {label:query.get('label') || ''} : layer === 'local-datacenters' ? {name:query.get('name') || '', operator:query.get('operator') || ''} : { name: query.get('name') || '', type: query.get('type') || '' }) : null;
             if (filter) {
-              if (!['satellites', 'flights'].includes(layer)) return json(res, 400, {error: 'Unsupported filter layer'});
-              try { (layer === 'flights' ? flightQuery : satelliteQuery)(filter); } catch (error) { return json(res, 400, {error: error.message}); }
+              if (!['satellites', 'flights', 'local-datacenters', 'ais-live-vessels'].includes(layer)) return json(res, 400, {error: 'Unsupported filter layer'});
+              try { (layer === 'flights' ? flightQuery : layer === 'ais-live-vessels' ? aisQuery : layer === 'local-datacenters' ? datacenterQuery : satelliteQuery)(filter); } catch (error) { return json(res, 400, {error: error.message}); }
             }
             const body = await pipeline.snapshot(layer, cohort, null, filter);
             errors.delete(`${requestLayer}:${route}`);

@@ -5953,6 +5953,7 @@ body.cockpit-mode #intel-hud .hud-right-edge { right: 22px; }
   outline: 1px solid #ff827a; outline-offset: 2px;
 }
 .redis-filter-form { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: 6px; margin: 9px 0 2px; }
+.redis-filter-form.redis-filter-single { grid-template-columns: minmax(0, 1fr); }
 .redis-filter-form[hidden] { display: none; }
 .data-toggle-row:not(:has(.data-toggle-btn.active:not(.disabling))) .redis-filter-toggle,
 .data-toggle-row:not(:has(.data-toggle-btn.active:not(.disabling))) .redis-filter-form { display: none; }

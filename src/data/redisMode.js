@@ -1,9 +1,9 @@
-import { createRedisLayerFilter, satelliteFilter, satelliteFilterOpen, flightFilter, flightFilterOpen, refreshFlightFilterOptions } from './redisSatelliteFilter.js';
+import { createRedisLayerFilter, aisFilter, aisFilterOpen, datacenterFilter, datacenterFilterOpen, satelliteFilter, satelliteFilterOpen, flightFilter, flightFilterOpen, refreshFlightFilterOptions } from './redisSatelliteFilter.js';
 
 let layerManager = null;
 const layerRequests = new Map();
 const viewReceipts = new Map();
-const readOnly = {satellites: 0, flights: 0};
+const readOnly = {satellites: 0, flights: 0, 'local-datacenters':0, 'ais-live-vessels':0};
 const viewRequests = new Map();
 export const redisFlightViewReadOnly = () => redisEnabled() && readOnly.flights > 0;
 export const redisSatelliteFilterActive = () => redisEnabled() && satelliteFilter() !== null;
@@ -40,14 +40,14 @@ export function installRedisMode(manager) {
   };
   manager.formatLayerMeta = (layer, original) => redisMeta(manager, layer, original);
   manager.extendLayerRow = (layer, row) => {
-    if (!['satellites', 'flights'].includes(layer.id) || !redisEnabled()) return;
+    if (!['satellites', 'flights', 'local-datacenters', 'ais-live-vessels'].includes(layer.id) || !redisEnabled()) return;
     createRedisLayerFilter(row, {
       layerId: layer.id,
       enabled: () => manager.isEffectivelyEnabled(layer.id),
-      loadTypes: layer.id === 'flights' ? async (label) => {
-        const signal = layerSignal('flights', AbortSignal.timeout(5000));
-        const response = await fetch('/api/redis/flight-types?' + new URLSearchParams({label}), {signal, cache: 'no-store'});
-        if (!response.ok) throw new Error('Flight types unavailable');
+      loadTypes: ['flights','local-datacenters'].includes(layer.id) ? async (label) => {
+        const signal = layerSignal(layer.id, AbortSignal.timeout(5000));
+        const response = await fetch((layer.id === 'flights' ? '/api/redis/flight-types?' : '/api/redis/datacenter-operators?') + new URLSearchParams(layer.id === 'flights' ? {label} : {name:label}), {signal, cache: 'no-store'});
+        if (!response.ok) throw new Error(layer.id === 'flights' ? 'Flight types unavailable' : 'Datacenter operators unavailable');
         return response.json();
       } : null,
       changed: () => manager._refreshTogglePanel(),
@@ -81,12 +81,12 @@ export function layerFetch(layer) {
     // A radio listener click is a provider interaction, not a map-data update.
     if (layer === 'radio' && url.pathname.startsWith('/api/radio/click/')) return globalThis.fetch(input, init);
     const source = url.origin === globalThis.location.origin ? url.pathname + url.search : url.href;
-    const isView = layer === 'satellites' || (layer === 'flights' && url.pathname === '/api/opensky');
+    const isView = (layer === 'ais-live-vessels' && url.pathname === '/api/ais-live') || layer === 'local-datacenters' || layer === 'satellites' || (layer === 'flights' && url.pathname === '/api/opensky');
     if (isView) {
       if (!viewRequests.has(layer)) viewRequests.set(layer, new AbortController());
       signal = AbortSignal.any([signal, viewRequests.get(layer).signal]);
     }
-    const filter = isView ? (layer === 'flights' ? flightFilter() : satelliteFilter()) : null;
+    const filter = isView && !init.redisUnfiltered ? (layer === 'ais-live-vessels' ? aisFilter() : layer === 'flights' ? flightFilter() : layer === 'local-datacenters' ? datacenterFilter() : satelliteFilter()) : null;
     if (isView && (readOnly[layer] || init.redisReadOnly) && viewReceipts.has(source)) {
       const response = await readProjection(Response.json(viewReceipts.get(source)), signal, filter);
       if (response.status !== 503) return response;
@@ -243,7 +243,7 @@ export function redisMeta(manager, layer, original = '') {
   if (!redisEnabled()) return null;
   const error = manager._redisError || manager._redisStats?.[layer.id]?.error;
   const stats = manager._redisStats?.[layer.id];
-  const source = original && layer.enabled && !((layer.id === 'satellites' && satelliteFilterOpen()) || (layer.id === 'flights' && flightFilterOpen())) ? `\n${original}` : '';
+  const source = original && layer.enabled && !((layer.id === 'ais-live-vessels' && aisFilterOpen()) || (layer.id === 'satellites' && satelliteFilterOpen()) || (layer.id === 'flights' && flightFilterOpen()) || (layer.id === 'local-datacenters' && datacenterFilterOpen())) ? `\n${original}` : '';
   if (error) return `STREAM UNAVAILABLE · ${error}${source}`;
   if (!stats) return layer.enabled ? `Waiting for source${source}` : '';
   const n = value => Number(value || 0).toLocaleString('en-US');

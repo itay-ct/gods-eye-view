@@ -1,4 +1,4 @@
-import { layerFetch } from './redisMode.js';
+import { layerFetch, redisEnabled } from './redisMode.js';
 import * as Cesium from 'cesium';
 import { governorRequestRender } from '../renderGovernor.js';
 import {
@@ -354,6 +354,7 @@ export function createLocalGeoJsonLayer({
     host: overlayHost,
   });
 
+  let _filterIds = null;
   const disableLayer = (viewer) => {
     _enabled = false;
     clearGroundRetryRender();
@@ -385,8 +386,22 @@ export function createLocalGeoJsonLayer({
       // DataLayerManager calls this once
     },
     
-    update: async (viewer) => {
-      // DataLayerManager calls this when enabled
+    update: async (viewer, {signal} = {}) => {
+      if (id !== 'local-datacenters' || !redisEnabled() || !_dataSource || !_enabled) return;
+      const response = await fetch(url, {signal, redisReadOnly:true});
+      if (!response.ok) throw new Error('Datacenter Search unavailable');
+      const text = await response.text();
+      signal?.throwIfAborted();
+      if (!_enabled || _destroyed) return;
+      _filterIds = new Set(text.split('\n').filter(line=>line.trim()).map(line=>String(JSON.parse(line).id)));
+      for (const entity of _dataSource.entities.values) entity.show = _filterIds.has(String(entity.id));
+      _count = _filterIds.size;
+      if (viewer.selectedEntity?.__localLayerId === id && !_filterIds.has(String(viewer.selectedEntity.id))) {
+        clearSelectedEntityContextForLayer(id); viewer.selectedEntity = undefined;
+      }
+      _overlayPublisher.hide(); _overlayPublisher.show();
+      _lastVisibilityUpdate = Number.NEGATIVE_INFINITY;
+      viewer.scene.requestRender?.();
     },
     
     /**
@@ -423,7 +438,7 @@ export function createLocalGeoJsonLayer({
         // windows (before vs after the add settles) need different cleanup.
         let addedToScene = false;
         try {
-          const response = await fetch(url);
+          const response = await fetch(url, id === 'local-datacenters' ? {redisUnfiltered:true} : undefined);
           // A 404 returns an HTML body that would otherwise die in JSON.parse
           // one line later, reported as a parse error for a missing file.
           if (!response.ok) {
@@ -653,6 +668,7 @@ export function createLocalGeoJsonLayer({
           let groundSampleProgress = false;
           for (let i = 0; i < _stemRecords.length; i++) {
             const record = _stemRecords[i];
+            if (_filterIds && !_filterIds.has(record.id)) { record.entity.show = false; continue; }
             const wasGroundSampled = record.groundSampled;
             if (refreshStemGeometry) {
               updateLocalStemGeometry(viewer, record, now);
