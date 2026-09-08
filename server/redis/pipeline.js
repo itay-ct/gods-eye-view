@@ -4,6 +4,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { unpackBody, entityDocument } from './payload.js';
 import { satelliteSourceGroup } from '../../src/data/satelliteClass.js';
 import { ensureSatelliteIndex, satelliteQuery } from './satelliteSearch.js';
+import { ensureFlightIndex, flightQuery, flightTypeOptions, flightTypeSummary } from './flightSearch.js';
 
 export const GROUP = 'view-projector';
 const CONSUMER = 'local-view'; // One local projector; restart drains its own pending list first.
@@ -87,8 +88,37 @@ for _, event in ipairs(events) do
       for i, record in ipairs(items) do
         redis.call('CMS.INCRBY', KEYS[3], record.item, 1)
         local collections = memberships(record.key, m.cohort, true)
+        local enrichment = {}
+        if string.find(KEYS[2], ':flights$') then
+          local previous = redis.call('JSON.GET', record.key)
+          local old = previous and cjson.decode(previous) or {}
+          local incoming = cjson.decode(documents[i])
+          for _, field in ipairs({'typeCode', 'typeName', 'registration', 'enrichmentUpdatedAt', 'typeKnown'}) do
+            if old[field] and old[field] ~= cjson.null and (not incoming[field] or incoming[field] == cjson.null or (old.enrichmentUpdatedAt or 0) > (incoming.enrichmentUpdatedAt or 0)) then
+              enrichment[field] = cjson.encode(old[field])
+            end
+          end
+        end
         -- Preserve the original JSON serialization (notably empty arrays).
-        redis.call('JSON.SET', record.key, '$', documents[i])
+        if record.update == 'aircraft-type' then
+          local patch = cjson.decode(documents[i])
+          if redis.call('EXISTS', record.key) == 0 then
+            redis.call('JSON.SET', record.key, '$', cjson.encode({id = patch.id, layer = 'flights', kind = 'aircraft-type'}))
+          end
+          for _, field in ipairs({'typeCode', 'typeName', 'registration', 'enrichmentUpdatedAt'}) do
+            if patch[field] and patch[field] ~= cjson.null and patch[field] ~= '' then
+              redis.call('JSON.SET', record.key, '.' .. field, cjson.encode(patch[field]))
+            end
+          end
+          if patch.typeName and patch.typeName ~= cjson.null and patch.typeName ~= '' then
+            redis.call('JSON.SET', record.key, '.typeKnown', '1')
+          end
+        else
+          redis.call('JSON.SET', record.key, '$', documents[i])
+          for field, value in pairs(enrichment) do
+            if value then redis.call('JSON.SET', record.key, '.' .. field, value) end
+          end
+        end
         redis.call('JSON.DEL', record.key, '.cohort')
         redis.call('JSON.SET', record.key, '.collections', cjson.encode(collections))
         satelliteType(record.key, collections, {cohort = m.cohort, metadata = cjson.decode(m.metadata)})
@@ -99,7 +129,7 @@ for _, event in ipairs(events) do
       for _, key in ipairs(oldMembers) do
         if not wanted[key] then
           local collections = memberships(key, m.cohort, false)
-          if #collections == 0 then redis.call('DEL', key)
+          if #collections == 0 and not string.find(key, ':flights:entity:states:') then redis.call('DEL', key)
           else
             redis.call('JSON.SET', key, '.collections', cjson.encode(collections))
             satelliteType(key, collections, nil)
@@ -179,6 +209,7 @@ export class RedisPipeline {
     const client = await this.connect();
     const keys = this.keys(layer);
     if (layer === 'satellites') await ensureSatelliteIndex(client, this.prefix);
+    if (layer === 'flights') await ensureFlightIndex(client, this.prefix);
     const previous = this.layers.get(layer);
     if (previous) await previous.ready.catch(() => {});
     const epoch = await client.eval(HEALTH, {
@@ -329,7 +360,7 @@ export class RedisPipeline {
     signal?.throwIfAborted();
     await this.checkEpoch(client, state);
     signal?.throwIfAborted();
-    const manifest = { ...packed.manifest, token, items: records.map(({ id, item, key }) => ({ id, item, key })) };
+    const manifest = { ...packed.manifest, token, items: records.map(({ id, item, key, update }) => ({ id, item, key, ...(update ? {update} : {}) })) };
     await client.sendCommand(['XADD', stream, 'MAXLEN', '~', String(this.maxlen), 'ACKED', '*', 'kind', 'commit', ...Object.entries({ ...common, items: JSON.stringify(manifest.items), metadata: JSON.stringify(snapshotMetadata(manifest, source)), at: String(Date.now()) }).flat()]);
     const key = `${base}:snapshot:${cohort}`;
     const deadline = Date.now() + 30000;
@@ -354,16 +385,24 @@ export class RedisPipeline {
   async snapshot(layer, cohort, token = null, filter = null) {
     const client = await this.connect();
     const { base } = this.keys(layer);
-    if (filter && layer !== 'satellites') throw new Error('Filtering is only supported for satellites');
-    const terms = filter ? satelliteQuery(filter) : '';
-    const query = filter ? `${terms === '*' ? '' : `(${terms}) `}@collections:{${cohort.replace(/[^\w]/g, '\\$&')}}` : '';
-    const index = filter ? await ensureSatelliteIndex(client, this.prefix) : '';
+    if (filter && !['satellites', 'flights'].includes(layer)) throw new Error('Unsupported filter layer');
+    const flightView = layer === 'flights' && /\/api\/opensky(?:\?|$)/.test(JSON.parse(await client.sendCommand(['JSON.GET', `${base}:snapshot:${cohort}`]) || '{}').source || '');
+    const terms = flightView ? flightQuery(filter || {}) : filter ? satelliteQuery(filter) : '';
+    const query = flightView ? terms : filter ? `${terms === '*' ? '' : `(${terms}) `}@collections:{${cohort.replace(/[^\w]/g, '\\$&')}}` : '';
+    const index = (filter || flightView) ? await (layer === 'flights' ? ensureFlightIndex : ensureSatelliteIndex)(client, this.prefix) : '';
     // Read the metadata, ordered references and entity sources atomically.
     const result = await client.eval(`
       local metadata = redis.call('JSON.GET', KEYS[1])
       if not metadata then return redis.error_reply('Redis snapshot not found') end
       local keys = redis.call('LRANGE', KEYS[1] .. ':members', 0, -1)
       if #keys ~= cjson.decode(metadata).count then return redis.error_reply('Redis snapshot membership incomplete') end
+      if ARGV[4] == '1' then
+        local found = redis.call('FT.SEARCH', ARGV[2], ARGV[1], 'NOCONTENT', 'LIMIT', '0', '100000', 'DIALECT', '2')
+        if found[1] ~= #found - 1 then return redis.error_reply('Flight Search result was truncated') end
+        local result = {metadata}
+        for i = 2, #found do table.insert(result, redis.call('JSON.GET', found[i])) end
+        return result
+      end
       local matches = nil
       if ARGV[1] ~= '' then
         matches = {}
@@ -376,15 +415,30 @@ export class RedisPipeline {
       local result = {metadata}
       for _, key in ipairs(keys) do
         if not matches or matches[key] then
-          local source = redis.call('JSON.GET', key, '.source')
+          local source = ARGV[3] == 'flights' and redis.call('JSON.GET', key) or redis.call('JSON.GET', key, '.source')
           if not source then return redis.error_reply('Redis entity missing from snapshot') end
           table.insert(result, source)
         end
       end
       return result
-    `, { keys: [`${base}:snapshot:${cohort}`], arguments: [query, index] });
+    `, { keys: [`${base}:snapshot:${cohort}`], arguments: [query, index, layer, flightView ? '1' : '0'] });
     const metadata = JSON.parse(result[0]);
     if (token && metadata.token !== token) throw new Error('Projection changed during snapshot read');
+    if (layer === 'flights') {
+      const documents = result.slice(1).map(JSON.parse);
+      if (metadata.encoding === 'aircraft-type') {
+        const doc = documents[0];
+        if (!doc) throw new Error('Redis aircraft enrichment missing');
+        return Buffer.from(JSON.stringify({found: true, typeCode: doc.typeCode ?? null,
+          typeName: doc.typeName ?? null, registration: doc.registration ?? null}));
+      }
+      if (metadata.groups.length === 1 && metadata.groups[0].path.join('.') === 'states') {
+        const aircraft = Object.fromEntries(documents.map(doc => [doc.id, {typeCode: doc.typeCode ?? null,
+          typeName: doc.typeName ?? null, registration: doc.registration ?? null}]));
+        return Buffer.from(JSON.stringify({...metadata.template, states: documents.map(doc => doc.source), aircraft}));
+      }
+      for (let i = 0; i < documents.length; i++) result[i + 1] = JSON.stringify(documents[i].source);
+    }
     if (filter) {
       if (metadata.encoding !== 'tle') throw new Error('Satellite snapshot is not TLE');
       return Buffer.from(result.slice(1).map(source => JSON.parse(source).text).join(''));
@@ -395,6 +449,10 @@ export class RedisPipeline {
     }))};
     return unpackBody(manifest, Object.fromEntries(result.slice(1).map((source, i) => [String(i), source])));
   }
+
+  async flightTypeSummary(label = '') { return flightTypeSummary(await this.connect(), this.prefix, label); }
+
+  async flightTypes(label = '') { return flightTypeOptions(await this.connect(), this.prefix, label); }
 
   /** Read-only estimate; never creates a sketch or ingests a source. */
   async updateCount(layer, id) {

@@ -71,6 +71,41 @@ XLEN gev:military:stream
 
 ## Redis Search readiness
 
+### Flights
+
+Aircraft type lookups (`/api/adsbdb/type/<icao24>`) now enter the flight Stream as enrichment records.
+The projector merges `typeCode`, `typeName`, `registration`, and `enrichmentUpdatedAt` into the same
+`gev:flights:entity:states:<icao24>` JSON as the position. Position snapshots preserve these fields;
+empty lookup fields do not erase known values. Lookups arriving before a position create an enrichment-only
+document, which becomes a flight when its first state vector arrives. Completed commit replay does not double-count CMS.
+Enrichment responses and map snapshots both read these fields from the entity JSON.
+Redis intake also joins fresh entries from GEV’s existing `.gev-cache/adsbdb.json` onto incoming state records before XADD. This reuses cached types for off-screen aircraft without additional provider calls or separate CMS increments. Entries older than the proxy’s 24-hour TTL are ignored; newer projected enrichment takes precedence.
+
+With Redis ON and Live Flights enabled, **Filter** shows **Label** and **Type** on one line. Edits immediately
+query Redis Search. Labels use word-prefix matching; Type selects the exact `typeName`. Excluded aircraft and
+their tracked labels are removed immediately, bypassing GEV's usual missing-poll grace. Filter off restores
+the full snapshot. Normal position polling and GEV's bounded type lookups continue through Streams.
+
+`gev:flights:idx` indexes label and typeName as TEXT, with typeName SORTABLE and a TAG alias for exact selection.
+The Type dropdown uses `FT.AGGREGATE` to show the 20 most common known type names
+among flights matching the current label, ordered by count descending (alphabetical ties).
+The All types option reports the total and how many have known type information. GEV enriches a bounded subset of visible aircraft; unknown types are not inferred. Counts refresh even with an empty label.
+Each option includes its count; the selected type does not restrict the option counts.
+The map uses `FT.SEARCH` over cached positioned aircraft, including aircraft missing from
+regional fallback responses. Missing aircraft retain their existing expiry without additional
+CMS increments; expired entities disappear. Unknown types remain visible with All types.
+
+```text
+JSON.GET gev:flights:entity:states:34454b
+FT.AGGREGATE gev:flights:idx '@kind:{states} @typeKnown:[1 1]' GROUPBY 1 @typeName REDUCE COUNT 0 AS count SORTBY 4 @count DESC @typeName ASC LIMIT 0 20
+FT.SEARCH gev:flights:idx '@kind:{states} @label:(VLG*)' LIMIT 0 100
+```
+
+Reload the demo once to populate previously unmerged type lookups through the new projector. No database flush
+is required. Type details retain the existing one-hour entity lifetime; a lookup does not invent a position.
+
+### Satellites
+
 Satellites automatically create `gev:satellites:idx` on the individual JSON documents:
 
 ```text
@@ -104,7 +139,7 @@ They are not live measurements. The browser still propagates the retained `sourc
 On the next normal ingestion, existing satellite documents gain these fields through the Stream projector.
 Overlapping catalog groups follow GEV's priority rather than last-arrival order.
 
-Other layers remain ready for indexes. For example, an aircraft index can use:
+Other layers remain ready for indexes. For example, a military-aircraft index can use:
 
 ```text
 FT.CREATE gev:military:idx ON JSON PREFIX 1 gev:military:entity: SCHEMA

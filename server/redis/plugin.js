@@ -1,6 +1,8 @@
 import { RedisPipeline } from './pipeline.js';
 import { digest, packBody } from './payload.js';
 import { satelliteQuery } from './satelliteSearch.js';
+import {enrichFlightRecords} from './flightEnrichment.js';
+import { flightQuery } from './flightSearch.js';
 
 const paths = {
   flights: [/^\/api\/opensky(?:-track)?$/, /^\/api\/adsbdb\//],
@@ -81,16 +83,24 @@ export function redisLayersPlugin({pipelineOptions} = {}) {
             errors.delete(`${layer}:${route}`);
             return json(res, 200, result);
           }
+          if (route === '/flight-types' && req.method === 'GET') {
+            requestLayer = 'flights';
+            const summary = await pipeline.flightTypeSummary(new URL(req.url, 'http://localhost').searchParams.get('label') || '');
+            errors.delete(`flights:${route}`);
+            return json(res, 200, summary);
+          }
           if (route === '/snapshot' && req.method === 'GET') {
             const query = new URL(req.url, 'http://localhost').searchParams;
             const layer = query.get('layer');
             const cohort = query.get('cohort');
             if (!Object.hasOwn(paths, layer) || !/^(?:[a-f0-9]{24}|bundled)$/.test(cohort || '')) return json(res, 400, { error: 'Invalid snapshot reference' });
             requestLayer = layer;
-            const filter = query.get('filter') === '1' ? { name: query.get('name') || '', type: query.get('type') || '' } : null;
+            const filter = query.get('filter') === '1' ? (layer === 'flights'
+              ? {label: query.get('label') || '', typeName: query.get('typeName') || ''}
+              : { name: query.get('name') || '', type: query.get('type') || '' }) : null;
             if (filter) {
-              if (layer !== 'satellites') return json(res, 400, {error: 'Only satellites support filtering'});
-              try { satelliteQuery(filter); } catch (error) { return json(res, 400, {error: error.message}); }
+              if (!['satellites', 'flights'].includes(layer)) return json(res, 400, {error: 'Unsupported filter layer'});
+              try { (layer === 'flights' ? flightQuery : satelliteQuery)(filter); } catch (error) { return json(res, 400, {error: error.message}); }
             }
             const body = await pipeline.snapshot(layer, cohort, null, filter);
             errors.delete(`${requestLayer}:${route}`);
@@ -136,6 +146,7 @@ export function redisLayersPlugin({pipelineOptions} = {}) {
             headers['cache-control'] = 'no-store';
             if (!upstream.ok) return { status: upstream.status, headers, body: buffer };
             const packed = packBody(buffer, upstream.headers.get('content-type'), url);
+            if (request.layer === 'flights') await enrichFlightRecords(packed);
             if (packed.records.length > 100000) throw new Error('Source snapshot exceeds 100,000 records');
             await pipeline.project(request.layer, cohort, packed, request.url, signal);
             return { status: 200, headers: { 'content-type': 'application/json', 'cache-control': 'no-store' }, body: JSON.stringify({

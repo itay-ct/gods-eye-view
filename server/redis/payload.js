@@ -23,7 +23,7 @@ export function packBody(buffer, contentType = '', url = '') {
     const ids = [];
     const occurrences = new Map();
     for (const row of rows) {
-      const item = identity(row);
+      const item = path.at(-1) === 'states' ? identity(row).toLowerCase() : identity(row);
       const occurrence = occurrences.get(item) || 0;
       occurrences.set(item, occurrence + 1);
       const id = `${groups.length}:${item}:${occurrence}`;
@@ -50,6 +50,17 @@ export function packBody(buffer, contentType = '', url = '') {
     return result;
   }
   const text = buffer.toString('utf8');
+  const aircraftId = url.match(/\/api\/adsbdb\/type\/([a-f0-9]{6})(?:\?|$)/i)?.[1]?.toLowerCase();
+  if (aircraftId) {
+    const data = JSON.parse(text);
+    if (data.found === true) {
+      const id = `type:${aircraftId}`;
+      return { records: [{id, item: aircraftId, kind: 'aircraft-type', update: 'aircraft-type',
+        entityKey: `states:${aircraftId}`, data: JSON.stringify({typeCode: data.typeCode ?? null,
+          typeName: data.typeName ?? null, registration: data.registration ?? null})}],
+        manifest: {encoding: 'aircraft-type', template: null, groups: [{path: [], ids: [id]}]} };
+    }
+  }
   let encoding = 'json';
   let template;
   if (/\.geojsonl(?:\?|$)/.test(url)) {
@@ -75,6 +86,9 @@ export function packBody(buffer, contentType = '', url = '') {
 /** Search-ready fields are native JSON values; source remains native nested JSON. */
 export function entityDocument(layer, cohort, record) {
   const source = JSON.parse(record.data);
+  if (layer === 'flights' && record.update === 'aircraft-type') {
+    return {id: record.item, layer, kind: 'aircraft-type', ...source, enrichmentUpdatedAt: Date.now()};
+  }
   const isState = layer === 'flights' && Array.isArray(source);
   const coordinates = source?.geometry?.type === 'Point' ? source.geometry.coordinates : [];
   const number = value => value == null || value === '' || !Number.isFinite(Number(value)) ? null : Number(value);
@@ -87,6 +101,7 @@ export function entityDocument(layer, cohort, record) {
     latitude, longitude, altitudeM, speedMps,
     location: latitude !== null && longitude !== null && Math.abs(latitude) <= 90 && Math.abs(longitude) <= 180 ? `${longitude},${latitude}` : null,
     fingerprint: digest(record.data), source,
+    ...(isState ? record.enrichment : {}),
     ...(layer === 'satellites' && source.text ? satelliteFields(source.text, record.satelliteGroup) : {}) };
 }
 

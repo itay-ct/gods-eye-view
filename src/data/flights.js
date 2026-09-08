@@ -1,4 +1,4 @@
-import { layerFetch } from './redisMode.js';
+import { layerFetch, redisFlightViewReadOnly } from './redisMode.js';
 const fetch = layerFetch('flights');
 
 /**
@@ -4067,7 +4067,7 @@ const flightsLayer = {
       source: _lastSource,
       coverage: _lastCoverage,
     };
-    if (_retryAt && nowMs < _retryAt) {
+    if (_retryAt && nowMs < _retryAt && !redisFlightViewReadOnly()) {
       _backoff = true;
       return;
     }
@@ -4135,6 +4135,7 @@ const flightsLayer = {
       }
 
       const data = await response.json();
+      const filtered = response.headers.get('x-gev-filtered') === '1';
       updateSignal.throwIfAborted();
       if (!data || !Array.isArray(data.states)) {
         _backoff = true;
@@ -4186,6 +4187,7 @@ const flightsLayer = {
       for (const state of usableStates) {
         const [rawIcao24, callsign, origin_country, time_position, last_contact, lon, lat, baro_alt, on_ground, velocity, true_track, , , geo_alt] = state;
         const icao24 = _normalizeTrackedIcao(rawIcao24);
+        const enriched = data.aircraft?.[icao24];
         const category = Number.isFinite(state[17]) ? state[17] : null; // extended=1 emitter category
         const vertical_rate = Number.isFinite(state[11]) ? state[11] : null; // m/s, + = climbing
         acceptedSnapshotIcaos.add(icao24);
@@ -4370,7 +4372,7 @@ const flightsLayer = {
           true_track: stickyNumber(true_track, prevMeta?.true_track, 0),
           category: cat,
           // An adsbdb-enriched type code outranks the coarse OpenSky category.
-          klass: classifyAircraft({ typeCode: prevMeta?.typeCode ?? null, category: cat }),
+          klass: classifyAircraft({ typeCode: enriched?.typeCode ?? prevMeta?.typeCode ?? null, category: cat }),
           turnRateDps: prevMeta?.turnRateDps || 0,
           verticalRate: stickyNumber(vertical_rate, prevMeta?.verticalRate, null),
           // Analyst seam: OpenSky origin_country (state[2]) — additive, sticky
@@ -4386,9 +4388,9 @@ const flightsLayer = {
             null,
           ),
           // adsbdb enrichment — written by the enrichment callbacks, carried across polls:
-          typeCode: prevMeta?.typeCode ?? null,
-          typeName: prevMeta?.typeName ?? null,
-          registration: prevMeta?.registration ?? null,
+          typeCode: enriched?.typeCode ?? prevMeta?.typeCode ?? null,
+          typeName: enriched?.typeName ?? prevMeta?.typeName ?? null,
+          registration: enriched?.registration ?? prevMeta?.registration ?? null,
           airline: prevMeta?.airline ?? null,
           route: prevMeta?.route ?? null,
           // The RAW poll fix lat/lon (this tick's OpenSky state-vector
@@ -4532,7 +4534,7 @@ const flightsLayer = {
         if (currentIcaos.has(icao24)) continue;
         const misses = (_missingPolls.get(icao24) || 0) + 1;
         const limit = _likelyLanded(icao24) ? LANDED_MISSING_POLL_LIMIT : MISSING_POLL_LIMIT;
-        if (misses < limit) {
+        if (!filtered && misses < limit) {
           _missingPolls.set(icao24, misses);
           if (icao24 === _trackedIcao && _trackedEntity) {
             // Honest readout: the tracked plane has no faded billboard (its
@@ -4571,7 +4573,7 @@ const flightsLayer = {
 
       // Ambient type enrichment: give ON-SCREEN planes real types (bounded
       // sweep — see _sweepAmbientEnrichment; internally fail-silent).
-      _sweepAmbientEnrichment();
+      if (!redisFlightViewReadOnly()) _sweepAmbientEnrichment();
 
       // 2026-08-19: the loop above only ever collects FIX cells, but a grounded
       // contact renders across every cell its dead-reckoned position drifts

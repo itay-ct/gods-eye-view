@@ -1,9 +1,11 @@
-import { createSatelliteFilter, satelliteFilter, satelliteFilterOpen } from './redisSatelliteFilter.js';
+import { createRedisLayerFilter, satelliteFilter, satelliteFilterOpen, flightFilter, flightFilterOpen, refreshFlightFilterOptions } from './redisSatelliteFilter.js';
 
 let layerManager = null;
 const layerRequests = new Map();
-const satelliteReceipts = new Map();
-let satelliteReadOnly = 0;
+const viewReceipts = new Map();
+const readOnly = {satellites: 0, flights: 0};
+const viewRequests = new Map();
+export const redisFlightViewReadOnly = () => redisEnabled() && readOnly.flights > 0;
 export const redisSatelliteFilterActive = () => redisEnabled() && satelliteFilter() !== null;
 
 function cancelLayerRequests(layer) {
@@ -38,15 +40,23 @@ export function installRedisMode(manager) {
   };
   manager.formatLayerMeta = (layer, original) => redisMeta(manager, layer, original);
   manager.extendLayerRow = (layer, row) => {
-    if (layer.id !== 'satellites' || !redisEnabled()) return;
-    createSatelliteFilter(row, {
-      enabled: () => manager.isEffectivelyEnabled('satellites'),
+    if (!['satellites', 'flights'].includes(layer.id) || !redisEnabled()) return;
+    createRedisLayerFilter(row, {
+      layerId: layer.id,
+      enabled: () => manager.isEffectivelyEnabled(layer.id),
+      loadTypes: layer.id === 'flights' ? async (label) => {
+        const signal = layerSignal('flights', AbortSignal.timeout(5000));
+        const response = await fetch('/api/redis/flight-types?' + new URLSearchParams({label}), {signal, cache: 'no-store'});
+        if (!response.ok) throw new Error('Flight types unavailable');
+        return response.json();
+      } : null,
       changed: () => manager._refreshTogglePanel(),
       refresh: async (signal) => {
-        cancelLayerRequests('satellites');
-        satelliteReadOnly++;
-        try { return await manager.refreshLayer('satellites', {signal}); }
-        finally { satelliteReadOnly--; }
+        viewRequests.get(layer.id)?.abort();
+        viewRequests.delete(layer.id);
+        readOnly[layer.id]++;
+        try { return await manager.refreshLayer(layer.id, {signal}); }
+        finally { readOnly[layer.id]--; }
       },
     });
   };
@@ -54,7 +64,9 @@ export function installRedisMode(manager) {
     unsubscribeIntent(); unsubscribeState(); unsubscribeDestroy();
     for (const layer of layerRequests.keys()) cancelLayerRequests(layer);
     if (layerManager === manager) layerManager = null;
-    satelliteReceipts.clear();
+    viewReceipts.clear();
+    for (const controller of viewRequests.values()) controller.abort();
+    viewRequests.clear();
     clearInterval(manager._redisStatsTimer);
     manager._redisStatsTimer = null;
   };
@@ -64,14 +76,19 @@ export function installRedisMode(manager) {
 export function layerFetch(layer) {
   return async (input, init = {}) => {
     if (!redisEnabled()) return globalThis.fetch(input, init);
-    const signal = layerSignal(layer, init.signal);
+    let signal = layerSignal(layer, init.signal);
     const url = new URL(String(input), globalThis.location.href);
     // A radio listener click is a provider interaction, not a map-data update.
     if (layer === 'radio' && url.pathname.startsWith('/api/radio/click/')) return globalThis.fetch(input, init);
     const source = url.origin === globalThis.location.origin ? url.pathname + url.search : url.href;
-    const filter = layer === 'satellites' ? satelliteFilter() : null;
-    if (layer === 'satellites' && (satelliteReadOnly || init.redisReadOnly) && satelliteReceipts.has(source)) {
-      const response = await readProjection(Response.json(satelliteReceipts.get(source)), signal, filter);
+    const isView = layer === 'satellites' || (layer === 'flights' && url.pathname === '/api/opensky');
+    if (isView) {
+      if (!viewRequests.has(layer)) viewRequests.set(layer, new AbortController());
+      signal = AbortSignal.any([signal, viewRequests.get(layer).signal]);
+    }
+    const filter = isView ? (layer === 'flights' ? flightFilter() : satelliteFilter()) : null;
+    if (isView && (readOnly[layer] || init.redisReadOnly) && viewReceipts.has(source)) {
+      const response = await readProjection(Response.json(viewReceipts.get(source)), signal, filter);
       if (response.status !== 503) return response;
       const failure = await response.clone().json().catch(() => ({}));
       if (!/Redis snapshot not found|Redis snapshot membership incomplete|Redis entity missing from snapshot/.test(failure.error || '')) return response;
@@ -83,8 +100,8 @@ export function layerFetch(layer) {
       signal,
       cache: 'no-store',
     });
-    return ingestAndRead(ingest, signal, filter, layer === 'satellites'
-      ? receipt => satelliteReceipts.set(source, receipt) : null);
+    return ingestAndRead(ingest, signal, filter, isView
+      ? receipt => viewReceipts.set(source, receipt) : null);
   };
 }
 
@@ -194,6 +211,7 @@ export function createRedisControl(manager) {
       finally {
         manager._redisStatsLoading = false;
         manager._refreshTogglePanel();
+        void refreshFlightFilterOptions();
         const currentWarning = manager._toggleContainer?.querySelector('.redis-mode-warning');
         if (currentWarning) {
           const message = redisWarning(manager);
@@ -225,7 +243,7 @@ export function redisMeta(manager, layer, original = '') {
   if (!redisEnabled()) return null;
   const error = manager._redisError || manager._redisStats?.[layer.id]?.error;
   const stats = manager._redisStats?.[layer.id];
-  const source = original && layer.enabled && !(layer.id === 'satellites' && satelliteFilterOpen()) ? `\n${original}` : '';
+  const source = original && layer.enabled && !((layer.id === 'satellites' && satelliteFilterOpen()) || (layer.id === 'flights' && flightFilterOpen())) ? `\n${original}` : '';
   if (error) return `STREAM UNAVAILABLE · ${error}${source}`;
   if (!stats) return layer.enabled ? `Waiting for source${source}` : '';
   const n = value => Number(value || 0).toLocaleString('en-US');
