@@ -3098,3 +3098,24 @@ test('a layer that surrenders its row controls hides the block entirely', async 
     else globalThis.document = originalDocument;
   }
 });
+
+
+test('background Redis refresh retains serialization without publishing loading UI', async () => {
+  const mgr = new DataLayerManager({});
+  let finish, loading = false;
+  mgr.register({id:'ais-live-vessels', name:'AIS', init(){}, enable(){}, disable(){},
+    async update(){ loading=true; await new Promise(resolve=>{finish=resolve;}); loading=false; },
+    getStats(){return {count:20, loading, loadingLabel:loading?'refreshing...':'', lastUpdate:123};},
+  });
+  const entry=mgr.layers.get('ais-live-vessels');
+  Object.assign(entry,{initialized:true,enabled:true,lifecycleState:'enabled'});
+  const pending=mgr.refreshLayer('ais-live-vessels',{background:true});
+  assert.equal(entry.refreshing,true,'background work still prevents concurrent updates');
+  const stats=mgr.getAll()[0].stats;
+  assert.equal(stats.loading,false);
+  assert.equal(stats.refreshing,false);
+  assert.equal(stats.loadingLabel,'');
+  assert.equal(stats.count,20);
+  finish(); assert.equal(await pending,true);
+  assert.equal(entry.backgroundRefresh,false);
+});

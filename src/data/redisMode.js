@@ -17,7 +17,7 @@ function queueProgressRefresh(layer) {
     const entry = layerManager.layers.get(layer);
     if (entry.lifecycleState !== 'enabled') {progressRefreshes.delete(layer); queueProgressRefresh(layer); return;}
     readOnly[layer] = (readOnly[layer] || 0) + 1;
-    try {await layerManager.refreshLayer(layer, {signal:layerSignal(layer)});}
+    try {await layerManager.refreshLayer(layer, {signal:layerSignal(layer), background:true});}
     catch (error) {
       if (error.name !== 'AbortError') layerManager._redisRequestErrors = [...(layerManager._redisRequestErrors || []), error.message];
     }

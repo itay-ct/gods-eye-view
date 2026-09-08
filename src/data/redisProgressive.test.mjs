@@ -15,9 +15,12 @@ test('cached Redis data returns before ingestion finishes, then completion sched
   assert.equal((await (await first).json()).ac[0].hex,'cached');
   await readWhileIngesting('warm-test',options);
   assert.equal(starts,1,'repeated refreshes must share the active ingestion');
+  writer.enqueue(encode({heartbeat:true}));
+  await new Promise(resolve=>setTimeout(resolve,0));
+  assert.equal(refreshed,0,'keepalives must not refresh the map');
   writer.enqueue(encode({done:true})); writer.close();
   await new Promise(resolve=>setTimeout(resolve,0));
-  assert.ok(refreshed>0);
+  assert.equal(refreshed,1,'completion schedules exactly one final refresh');
 });
 
 test('cold reads wait for the first batch, not for the final commit', async () => {

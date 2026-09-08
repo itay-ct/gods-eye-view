@@ -263,8 +263,9 @@ export class DataLayerManager {
       count: 0,
       lastUpdate: null,
       ...moduleStats,
-      loading: lifecycleLoading || moduleStats.loading === true,
-      refreshing: entry.refreshing || moduleStats.refreshing === true,
+      loading: lifecycleLoading || (!entry.backgroundRefresh && moduleStats.loading === true),
+      refreshing: !entry.backgroundRefresh && (entry.refreshing || moduleStats.refreshing === true),
+      ...(entry.backgroundRefresh ? {loadingLabel: ''} : {}),
       managerRefreshError: entry.managerRefreshError,
     };
   }
@@ -274,6 +275,7 @@ export class DataLayerManager {
     const refreshEpoch = entry.refreshEpoch;
     entry.refreshEpoch += 1;
     entry.refreshing = false;
+    entry.backgroundRefresh = false;
     if (wasRefreshing) {
       this._refreshTogglePanel();
       this._notifyListeners({
@@ -286,7 +288,7 @@ export class DataLayerManager {
     }
   }
 
-  async _runPeriodicUpdate(layerId, entry, { signal = null } = {}) {
+  async _runPeriodicUpdate(layerId, entry, { signal = null, background = false } = {}) {
     if (
       !entry.enabled
       || entry.lifecycleState !== 'enabled'
@@ -296,6 +298,7 @@ export class DataLayerManager {
     ) return false;
     const refreshEpoch = ++entry.refreshEpoch;
     entry.refreshing = true;
+    entry.backgroundRefresh = background;
     this._refreshTogglePanel();
     this._notifyListeners({
       type: 'refresh-transition',
@@ -333,6 +336,7 @@ export class DataLayerManager {
         && entry.refreshEpoch === refreshEpoch
       ) {
         entry.refreshing = false;
+        entry.backgroundRefresh = false;
         entry.managerRefreshError = null;
         this._refreshTogglePanel();
         this._notifyListeners({
@@ -355,6 +359,7 @@ export class DataLayerManager {
     }
 
     entry.refreshing = false;
+    entry.backgroundRefresh = false;
     entry.managerRefreshError = failure ? String(failure.message || failure) : null;
     this._refreshTogglePanel();
     if (failure) {
@@ -388,7 +393,7 @@ export class DataLayerManager {
    * @param {AbortSignal|null} [options.signal] Caller cancellation authority.
    * @returns {Promise<boolean>} True only when the requested fresh update settles successfully.
    */
-  async refreshLayer(layerId, { signal = null } = {}) {
+  async refreshLayer(layerId, { signal = null, background = false } = {}) {
     const entry = this.layers.get(layerId);
     if (
       !entry
@@ -432,7 +437,7 @@ export class DataLayerManager {
       ) return false;
     }
 
-    return this._runPeriodicUpdate(layerId, entry, { signal });
+    return this._runPeriodicUpdate(layerId, entry, { signal, background });
   }
 
   /**

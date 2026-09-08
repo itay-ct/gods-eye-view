@@ -215,11 +215,11 @@ export class RedisPipeline {
     this.scriptHashes.set(script, sha);
     const options = {keys: [state.stream, state.base, state.cms],
       arguments: [JSON.stringify(payload), GROUP, String(TTL), String(state.maxlen), state.epoch]};
-    try {const result = await client.evalSha(sha, options); state.progressAt = Date.now(); return result;}
+    try {const result = await client.evalSha(sha, options); state.progressAt = Date.now(); if (script === COMMIT) state.publishedBatches = (state.publishedBatches || 0) + 1; return result;}
     catch (error) {
       if (!error.message.includes('NOSCRIPT')) throw error;
       await client.scriptLoad(script);
-      const result = await client.evalSha(sha, options); state.progressAt = Date.now(); return result;
+      const result = await client.evalSha(sha, options); state.progressAt = Date.now(); if (script === COMMIT) state.publishedBatches = (state.publishedBatches || 0) + 1; return result;
     }
   }
   async commitSnapshot(client, state, {id: eventId, message}) {

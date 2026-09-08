@@ -153,6 +153,8 @@ test('progressive HTTP delivers cached Redis data before its upstream finishes a
     const packet=JSON.parse(new TextDecoder().decode((await reader.read()).value).split('\n')[0]);
     const cached=await (await fetch(base+packet.snapshotUrl)).json();
     assert.equal(cached.ac[0].hex,'cached');
+    const heartbeat=JSON.parse(new TextDecoder().decode((await reader.read()).value).trim());
+    assert.deepEqual(heartbeat,{heartbeat:true},'waiting for upstream is not projection progress');
     controller.abort();await delay(80);
     upstream?.end('{"ac":[{"hex":"late"}]}');await delay(80);
     assert.equal(await client.xLen(`${prefix}:military:stream`),2,'aborted source never enters the Stream');

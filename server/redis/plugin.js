@@ -171,7 +171,15 @@ export function redisLayersPlugin({pipelineOptions} = {}) {
             streaming = true;
             res.writeHead(200, {'Content-Type':'application/x-ndjson', 'Cache-Control':'no-store', 'X-Accel-Buffering':'no'});
             res.write(JSON.stringify({snapshotUrl:`/api/redis/snapshot?layer=${encodeURIComponent(request.layer)}&cohort=${cohort}&progressive=1`,headers:{}}) + '\n');
-            heartbeat = setInterval(() => {if (!res.destroyed) res.write('{"progress":true}\n');}, 1000);
+            let lastProgress = null;
+            heartbeat = setInterval(() => {
+              if (res.destroyed) return;
+              const state = pipeline.layers.get(request.layer);
+              const progress = state?.publishedBatches ? `${state.epoch}:${state.publishedBatches}` : null;
+              const changed = progress !== null && progress !== lastProgress;
+              lastProgress = progress;
+              res.write(JSON.stringify(changed ? {progress:true} : {heartbeat:true}) + '\n');
+            }, 1000);
           }
           const result = await (async () => {
             // Check Redis before spending provider credits. Never silently bypass it.

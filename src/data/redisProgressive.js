@@ -34,7 +34,7 @@ export async function readWhileIngesting(key, {start, read, signal, lifetime, on
             else if (packet.headers && job.receipt) Object.assign(job.receipt.headers, packet.headers);
             if (packet.error) throw new Error(packet.error);
             if (packet.done) job.completed=true;
-            if (job.shown && (packet.progress || packet.done)) onProgress();
+            if (job.shown && packet.progress && !packet.done) onProgress();
           }
         }
         if (!job.completed) throw new Error('Redis ingestion connection closed before completion');

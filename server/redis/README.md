@@ -226,7 +226,7 @@ Layer OFF aborts ingestion and pending reads. Snapshot reads remain pipelined in
 
 The consumer also trims to the layer’s target (100,000 or 10,000) after each read batch and completed commit. Unacknowledged events are protected, so retention can temporarily exceed the target. Large snapshots remain valid because earlier entries are staged before trimming. Intake pauses above twice the retention target; `noeviction` makes memory pressure visible. Keep one projector
 process for this MVP. Before adding workers, add ordering/ownership rules and abandoned-consumer claiming.
-Source polling is retained. The ingestion control stream triggers coalesced Redis view refreshes; it does not use Redis Pub/Sub or browser SSE.
+Source polling is retained. The ingestion control stream triggers coalesced Redis view refreshes only when publication advances, plus one final refresh. Keepalives are silent, and background reads do not show loading banners or change the layer button to LOADING. It does not use Redis Pub/Sub or browser SSE.
 
 ```sh
 node --test server/redis/pipeline.test.mjs
