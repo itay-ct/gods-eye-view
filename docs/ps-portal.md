@@ -11,6 +11,15 @@ The container uses GEV's Vite server because the existing source proxy and Redis
 pipeline APIs are development-server plugins. This is a PS demo deployment.
 Use the portal's authenticated access for the combined UI, including RedisInsight.
 
+The personal-lab image enables `GEV_TRUST_SETUP_PROXY=true` to retain the
+**POWER UP** key-entry panel behind nginx, with no additional password screen.
+Everyone with access to the lab can edit its provider keys. nginx overwrites
+the internal setup marker; Vite listens only on container loopback. Setup
+writes still require an exact Origin match (including HTTPS and port), JSON,
+and the existing credential validation. Ordinary non-container launches retain
+the local-only policy. Set `GEV_TRUST_SETUP_PROXY=false` in the container
+environment to disable setup through the proxy for a shared demo.
+
 ## Local build and launch
 
 ```sh

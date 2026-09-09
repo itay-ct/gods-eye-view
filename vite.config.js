@@ -7771,7 +7771,7 @@ export default defineConfig(({ mode }) => {
       host: env.HOST || 'localhost',
       port: parseInt(env.PORT, 10) || 4173,
       // When binding to all interfaces, allow any host; otherwise restrict to local names
-      allowedHosts: (env.HOST === '0.0.0.0' || env.HOST === '::')
+      allowedHosts: (env.HOST === '0.0.0.0' || env.HOST === '::' || env.GEV_TRUST_SETUP_PROXY === 'true')
         ? true
         : localAllowedHosts,
       fs: {

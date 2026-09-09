@@ -196,12 +196,17 @@ export function admitKeySetupRequest({
   proxyHeaders = {},
   env = {},
 } = {}) {
+  // Explicit opt-in for a personal lab. nginx overwrites this marker, and the
+  // container binds Vite to loopback so external clients cannot bypass nginx.
+  const trustedProxy = env.GEV_TRUST_SETUP_PROXY === 'true'
+    && proxyHeaders['x-gev-setup-proxy'] === '1'
+    && LOOPBACK_ADDRESSES.has(String(remoteAddress || ''));
   // A request carrying reverse-proxy / CDN forwarding headers did not originate
   // on this machine, whatever its socket says. Refuse them outright as defense
   // in depth — the shipped tunnel (Pinokio) is force-closed at boot, so these
   // only appear when someone has deliberately fronted the dev server.
   const PROXY_SIGNALS = ['forwarded', 'via', 'x-forwarded-for', 'x-forwarded-host', 'x-forwarded-port', 'x-forwarded-proto', 'x-real-ip', 'cf-connecting-ip', 'cf-ray'];
-  if (PROXY_SIGNALS.some((name) => String(proxyHeaders[name] || '').trim() !== '')) {
+  if (!trustedProxy && PROXY_SIGNALS.some((name) => String(proxyHeaders[name] || '').trim() !== '')) {
     return { ok: false, status: 403, error: 'Provider Settings does not answer proxied requests' };
   }
   // Every sharing signal the launcher recognizes (scripts/pinokio-preflight.mjs)
@@ -224,7 +229,17 @@ export function admitKeySetupRequest({
   if (!LOOPBACK_ADDRESSES.has(String(remoteAddress || ''))) {
     return { ok: false, status: 403, error: 'Provider Settings answers only the machine running the server' };
   }
-  const authority = localAuthority(hostHeader, protocol);
+  let authority = localAuthority(hostHeader, protocol);
+  if (trustedProxy) {
+    const scheme = proxyHeaders['x-forwarded-proto'];
+    try {
+      const address = new URL(`${scheme}://${hostHeader}`);
+      authority = ['http', 'https'].includes(scheme)
+        && address.host === hostHeader && !address.username && !address.password
+        && address.pathname === '/' && !address.search && !address.hash
+        ? address.origin : null;
+    } catch { authority = null; }
+  }
   if (!authority) {
     return { ok: false, status: 403, error: 'Provider Settings answers only local hostnames' };
   }

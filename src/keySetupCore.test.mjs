@@ -341,3 +341,24 @@ test('validation rejects dotenv metacharacters that would round-trip wrong', () 
     assert.equal(validateKeySetupUpdates({ OPENAI_API_KEY: good }).ok, true, `${good} accepted`);
   }
 });
+
+test('personal lab proxy opt-in retains socket, Origin, and JSON protections', async () => {
+  const { admitKeySetupRequest: admit } = await import('./keySetupCore.mjs');
+  const request = {
+    method: 'POST', remoteAddress: '127.0.0.1', hostHeader: 'demo.labs.ps-redis.com',
+    origin: 'https://demo.labs.ps-redis.com', contentType: 'application/json',
+    env: {GEV_TRUST_SETUP_PROXY: 'true'},
+    proxyHeaders: {'x-gev-setup-proxy': '1', 'x-forwarded-proto': 'https', 'x-forwarded-for': '10.0.0.5'},
+  };
+  assert.equal(admit(request).ok, true);
+  assert.equal(admit({...request, method: 'GET', origin: undefined}).ok, true);
+  assert.equal(admit({...request, hostHeader: 'localhost:18080', origin: 'http://localhost:18080', proxyHeaders: {...request.proxyHeaders, 'x-forwarded-proto': 'http'}}).ok, true);
+  for (const change of [
+    {env: {}}, {remoteAddress: '10.0.0.5'}, {origin: undefined},
+    {origin: 'https://evil.example'}, {origin: 'http://demo.labs.ps-redis.com'},
+    {hostHeader: 'demo.labs.ps-redis.com/path'}, {contentType: 'text/plain'},
+    {proxyHeaders: {...request.proxyHeaders, 'x-gev-setup-proxy': ''}},
+    {proxyHeaders: {...request.proxyHeaders, 'x-forwarded-proto': 'https,http'}},
+    {env: {...request.env, PINOKIO_SHARE_LOCAL: 'true'}},
+  ]) assert.equal(admit({...request, ...change}).ok, false, JSON.stringify(change));
+});

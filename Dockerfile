@@ -19,7 +19,7 @@ COPY docker/entrypoint.sh docker/healthcheck.sh /opt/bin/
 ENV RI_APP_HOST=127.0.0.1 RI_APP_PORT=5540 RI_PROXY_PATH=redisinsight \
     RI_REDIS_HOST=127.0.0.1 RI_REDIS_PORT=6379 RI_REDIS_ALIAS="GEV Redis" \
     RI_APP_FOLDER_ABSOLUTE_PATH=/data/redisinsight \
-    HOST=0.0.0.0 PORT=4173 GEV_ENV_DIR=/data/gev REDIS_URL=redis://127.0.0.1:6379 \
+    HOST=127.0.0.1 PORT=4173 GEV_ENV_DIR=/data/gev GEV_TRUST_SETUP_PROXY=true REDIS_URL=redis://127.0.0.1:6379 \
     VITE_REDISINSIGHT_URL=/redisinsight/0/browser/
 RUN chmod +x /opt/bin/*.sh && mkdir -p /data/redis /data/redisinsight /data/gev /tmp/nginx \
     && chown -R node:node /data /tmp/nginx
