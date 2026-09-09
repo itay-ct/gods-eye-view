@@ -7728,16 +7728,11 @@ export class StyleManager {
         && document.getElementById('global-context-panel')?.classList.contains('collapsed')) {
       this.setPanelCollapsed('global-context-panel', false, { restore, persist, syncShare });
     }
-    if (!nextCollapsed && !restore && panelId === 'location-bar') {
-      const otherPanel = document.getElementById('control-panel');
-      if (otherPanel && !otherPanel.classList.contains('dock-pinned')) {
-        this.setPanelCollapsed('control-panel', true, { restore, persist, syncShare });
-      }
-    } else if (!nextCollapsed && !restore && panelId === 'control-panel') {
-      const otherPanel = document.getElementById('location-bar');
-      if (otherPanel && !otherPanel.classList.contains('dock-pinned')) {
-        this.setPanelCollapsed('location-bar', true, { restore, persist, syncShare });
-      }
+    if (!nextCollapsed && ['location-bar', 'control-panel'].includes(panelId)) {
+      const otherId = panelId === 'location-bar' ? 'control-panel' : 'location-bar';
+      this._setCommandDockPanelPinState(otherId, false, { restore, persist, syncShare: false });
+      this.setPanelCollapsed(otherId, true, { restore, persist, syncShare });
+      window.dispatchEvent(new CustomEvent('gev:dock-tray-opened', { detail: { panelId } }));
     }
     panelEl.classList.toggle('collapsed', nextCollapsed);
     if (nextCollapsed && this.cockpitView?.active && panelId === 'data-panel'

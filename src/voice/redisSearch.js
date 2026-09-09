@@ -3,7 +3,7 @@ import {quickSearchOptions} from '../data/redisSearchPresets.js';
 import {redisEnabled} from '../data/redisMode.js';
 import {getSelectedEntityContext} from '../data/contextStore.js';
 
-export function initRedisSearch({viewer,dataManager}) {
+export function initRedisSearch({viewer,dataManager,styleManager}) {
   const dock=document.getElementById('command-dock');
   const control=document.createElement('section');control.id='redis-search-panel';control.className='collapsed';
   control.innerHTML=`<button class="redis-search-toggle" type="button" aria-expanded="false" aria-controls="redis-search-output">Redis Search</button>
@@ -24,6 +24,30 @@ export function initRedisSearch({viewer,dataManager}) {
   const panel=control.querySelector('#redis-search-output'),toggle=control.querySelector('.redis-search-toggle'),pin=control.querySelector('.dock-pin-btn');
   const button=control.querySelector('#redis-search-mic'),input=panel.querySelector('input'),status=panel.querySelector('[role=status]'),description=panel.querySelector('.redis-search-description'),results=panel.querySelector('.redis-search-results'),command=panel.querySelector('pre'),response=panel.querySelector('.redis-search-response');
   let pinned=false,hoverTimer=null,optionsKey='';
+  const keyTooltip='configure openai key for search to work';
+  const form=panel.querySelector('form'),submitButton=form.querySelector('[type=submit]');
+  let openAIConfigured=false,keyCheck=null;
+  function updateKeyState(configured){
+    openAIConfigured=configured;
+    form.title=configured?'':keyTooltip;
+    for(const element of [input,submitButton,button]){
+      element.disabled=!configured;
+      element.title=configured?(element===button?'Speak your search':element===submitButton?'Run search':''):keyTooltip;
+    }
+  }
+  async function refreshKeyState(){
+    if(keyCheck)return keyCheck;
+    keyCheck=(async()=>{
+      try{
+        const result=await fetch('/api/redis/search/status',{cache:'no-store',signal:AbortSignal.timeout(5000)});
+        updateKeyState(result.ok&&(await result.json()).openAIConfigured===true);
+      }catch{updateKeyState(false);}
+      finally{keyCheck=null;}
+    })();
+    return keyCheck;
+  }
+  updateKeyState(false);
+  void refreshKeyState();
   function positionPanel(){
     // Always stack this tray above any other open dock trays, including pinned ones.
     const dockTop=control.getBoundingClientRect().top;
@@ -39,16 +63,19 @@ export function initRedisSearch({viewer,dataManager}) {
     for(const option of options){const item=document.createElement('button');item.type='button';item.className='location-pill';item.textContent=option.label;item.dataset.preset=option.id;item.addEventListener('click',()=>{if(!dataManager.isEffectivelyEnabled(option.layer)){refreshOptions();return;}void submit(option.label,option.id);});container.append(item);}
     if(!options.length)container.textContent=redisEnabled()?'Search suggestions appear when a searchable layer is on.':'Turn Redis on to explore search suggestions.';
   }
-  function open(){clearTimeout(hoverTimer);refreshOptions();positionPanel();control.classList.remove('collapsed');panel.inert=false;toggle.setAttribute('aria-expanded','true');}
-  function close(){clearTimeout(hoverTimer);dismiss();input.value='';description.textContent='';command.textContent='';panel.querySelector('.redis-search-command').open=false;control.classList.add('collapsed');panel.inert=true;toggle.setAttribute('aria-expanded','false');}
-  function setPinned(value){pinned=value;control.classList.toggle('dock-pinned',value);pin.setAttribute('aria-pressed',String(value));pin.setAttribute('aria-label',`${value?'Unpin':'Pin'} Redis Search`);if(value)open();}
+  function open(){clearTimeout(hoverTimer);if(!control.classList.contains('collapsed'))return;for(const id of ['control-panel','location-bar']){styleManager?._setCommandDockPanelPinState(id,false);styleManager?.setPanelCollapsed(id,true);}if(control.classList.contains('collapsed'))void refreshKeyState();refreshOptions();positionPanel();control.classList.remove('collapsed');panel.inert=false;toggle.setAttribute('aria-expanded','true');}
+  function resetContent(){dismiss();input.value='';description.textContent='';command.textContent='';panel.querySelector('.redis-search-command').open=false;}
+  function close(){clearTimeout(hoverTimer);setPinned(false);control.classList.add('collapsed');panel.inert=true;toggle.setAttribute('aria-expanded','false');}
+  function setPinned(value){pinned=value;control.classList.toggle('dock-pinned',value);pin.setAttribute('aria-pressed',String(value));pin.setAttribute('aria-label',`${value?'Unpin':'Pin'} Redis Search`);if(value)open();else resetContent();}
   toggle.addEventListener('click',()=>control.classList.contains('collapsed')?open():close());
   pin.addEventListener('click',()=>setPinned(!pinned));
   control.addEventListener('mouseenter',()=>{clearTimeout(hoverTimer);hoverTimer=setTimeout(open,140);});
-  control.addEventListener('mouseleave',()=>{clearTimeout(hoverTimer);hoverTimer=setTimeout(()=>{if(!pinned&&document.activeElement!==input)close();},420);});
-  control.addEventListener('focusin',open);
+  control.addEventListener('mouseleave',()=>{clearTimeout(hoverTimer);hoverTimer=setTimeout(()=>{if(!pinned&&!control.matches(':hover'))close();},420);});
+  control.addEventListener('focusin',event=>{if(event.target.matches(':focus-visible'))open();});
   control.addEventListener('focusout',()=>{if(!pinned&&!control.matches(':hover'))hoverTimer=setTimeout(()=>{if(!control.contains(document.activeElement))close();},420);});
   control.addEventListener('keydown',event=>{if(event.key==='Escape'){setPinned(false);toggle.focus();close();}});
+  const otherTrayOpened=()=>close();
+  window.addEventListener('gev:dock-tray-opened',otherTrayOpened);
   const dockObserver=new MutationObserver(()=>{if(!control.classList.contains('collapsed'))positionPanel();});
   for(const id of ['control-panel','location-bar'])dockObserver.observe(document.getElementById(id),{attributes:true,attributeFilter:['class']});
   window.addEventListener('resize',positionPanel);
@@ -112,7 +139,8 @@ export function initRedisSearch({viewer,dataManager}) {
   }
   const layerStates=()=>dataManager.getAll().map(layer=>({id:layer.id,name:layer.name,enabled:dataManager.isEffectivelyEnabled(layer.id)}));
   async function submit(text,presetId=null){
-    cancel();setPinned(true);response.hidden=false;const generation=epoch;abort=new AbortController();const signal=abort.signal;
+    if(!presetId&&!openAIConfigured)return;
+    cancel();open();response.hidden=false;const generation=epoch;abort=new AbortController();const signal=abort.signal;
     input.value=text;results.replaceChildren();description.textContent='';command.textContent='';
     if(!redisEnabled()){setStatus('Turn Redis ON in Data Layers to search.');return;}
     try{
@@ -127,6 +155,7 @@ export function initRedisSearch({viewer,dataManager}) {
         try{
           const result=await post('run',{id:plan.id,layers:layerStates()},signal);if(generation!==epoch)return;
           render(result,generation);
+          if(first)setPinned(true);
           setStatus(`${result.operation==='aggregate'?'Live · every 2s':`${result.total} match${result.total===1?'':'es'}`} · ${new Date(result.at).toLocaleTimeString()} · ${result.elapsedMs} ms`);
           if(first&&result.focus&&result.operation!=='aggregate'&&result.rows[0])void focus(result.rows[0],result.layer,generation).catch(error=>{if(generation===epoch)setStatus(error.message);});
           first=false;
@@ -138,8 +167,9 @@ export function initRedisSearch({viewer,dataManager}) {
   }
   panel.querySelector('form').addEventListener('submit',event=>{event.preventDefault();if(input.value.trim())void submit(input.value.trim());});
   async function listen(){
+    if(!openAIConfigured)return;
     if(recorder?.state==='recording'){recorder.stop();return;}
-    cancel();setPinned(true);response.hidden=false;results.replaceChildren();description.textContent='';command.textContent='';
+    cancel();open();response.hidden=false;results.replaceChildren();description.textContent='';command.textContent='';
     setStatus('What do you want to search for?');
     if(!redisEnabled()){setStatus('Turn Redis ON in Data Layers to search.');return;}
     const generation=epoch;abort=new AbortController();const signal=abort.signal;
@@ -175,6 +205,6 @@ export function initRedisSearch({viewer,dataManager}) {
   }
   button.addEventListener('click',()=>void listen());
   const api={stop:dismiss,submit,dismiss};
-  window.addEventListener('pagehide',()=>{dismiss();clearInterval(optionTimer);unsubscribeLayers();dockObserver.disconnect();window.removeEventListener('resize',positionPanel);});
+  window.addEventListener('pagehide',()=>{dismiss();clearInterval(optionTimer);unsubscribeLayers();window.removeEventListener('gev:dock-tray-opened',otherTrayOpened);dockObserver.disconnect();window.removeEventListener('resize',positionPanel);});
   return api;
 }

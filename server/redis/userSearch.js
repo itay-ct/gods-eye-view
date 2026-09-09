@@ -191,9 +191,14 @@ export async function generatePlan(text, schemas, context, {signal, call=openAI,
 export function createUserSearch(pipeline){
   const plans=new Map();
   return async (route,req,res,signal)=>{
-    if(!['/search/transcribe','/search/plan','/search/preset','/search/run'].includes(route))return false;
+    if(!['/search/status','/search/transcribe','/search/plan','/search/preset','/search/run'].includes(route))return false;
     const send=(status,value)=>{res.writeHead(status,{'Content-Type':'application/json','Cache-Control':'no-store'});res.end(JSON.stringify(value));};
     try {
+      if(route==='/search/status'){
+        if(req.method!=='GET')send(405,{error:'GET required'});
+        else send(200,{openAIConfigured:Boolean(process.env.OPENAI_API_KEY?.trim())});
+        return true;
+      }
       if(req.method!=='POST'){send(405,{error:'POST required'});return true;}
       const chunks=[];let bytes=0;
       for await(const chunk of req){bytes+=chunk.length;if(bytes>10*1024*1024)throw new Error('Recording/request too large');chunks.push(chunk);}

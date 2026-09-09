@@ -330,7 +330,7 @@ async function init() {
       getRenderGovernorDiagnostics,
       requestRender: governorRequestRender,
     };
-    window.__godsEyeView.voiceCommands = initRedisSearch({ viewer, dataManager });
+    window.__godsEyeView.voiceCommands = initRedisSearch({ viewer, dataManager, styleManager });
 
   } catch (error) {
     console.error("God's Eye View initialization failed:", error);
