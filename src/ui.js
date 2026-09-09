@@ -387,7 +387,7 @@ const MILITARY_DETECTION_PRESET = Object.freeze({ mode: 'dense', densityPct: 75 
 const GLOBAL_POST_DEFAULTS = {
   bloom: { enabled: false, intensity: BLOOM_INTENSITY_DEFAULT },
   sharpen: { enabled: true, intensity: 49 },
-  hudVariant: 'tactical',
+  hudVariant: 'minimal',
   hudVisible: true,
   // Detection is ON for EVERY style on a first run, Normal included (owner
   // directive 2026-08-22: "detect should also be on by default"). It is the
@@ -9793,7 +9793,7 @@ export class StyleManager {
   // ── HUD Toggle ───────────────────────────────
 
   /**
-   * Wires the HUD toggle button, initializes the default HUD variant to 'tactical',
+   * Wires the HUD toggle button, initializes the default HUD variant to 'minimal',
    * and sets up the detection mode cycle button.
    * @returns {void}
    */
@@ -9889,9 +9889,9 @@ export class StyleManager {
     });
 
     if (this._hudLayoutSelect) {
-      this._hudLayoutSelect.value = 'tactical';
+      this._hudLayoutSelect.value = 'minimal';
     }
-    this._setHudVariant('tactical');
+    this._setHudVariant('minimal');
     this.hud.setMode('on');
     this._updateHudButtonState();
 

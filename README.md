@@ -598,3 +598,39 @@ One heads-up from the inside: build in this space for a week and you learn that 
 **🌐 God's Eye View. No place left behind.**
 
 </div>
+
+## Beta: Redis Search pane
+
+The default HUD is Minimal. Its duplicate coordinate strip is hidden;
+the bottom-left MGRS readout remains. Saved links still restore their explicit HUD choice.
+
+Hover **Redis Search** in the center dock, or click it, to open the search pane. Pin it to keep it open.
+The pane selects 3–5 predefined investigations from enabled searchable layers, without a model
+roundtrip. Examples include flights near Tel Aviv, common aircraft/satellite types, Starlink speed,
+vessels near shipping chokepoints, datacenter operators, and radio coverage. View-scoped options
+appear when camera bounds are available. Selecting an object adds up to two closest-object options
+alongside other investigations. Suggestions update when layers change; no active searchable layers
+means an empty state instead of unusable buttons.
+
+Type a custom request and press Enter. The optional microphone to the right plays a start cue and
+lights while listening; pause or press it again to finish.
+The server transcribes with `gpt-4o-mini-transcribe`, reads available Redis index schemas, and uses
+`gpt-5.6-terra` to generate a validated read-only query. Quick searches skip transcription and query generation.
+Search results focus the matching object. Enable its layer before searching; retained Redis data does not bypass this check.
+
+Examples:
+- “Show me the fastest moving communication satellite.”
+- “What is the closest military flight to this?” (select an object first).
+- “What is the average speed of airplanes above Israel now?”
+
+Queries are global unless the request explicitly mentions the current view or selected object.
+Named-area bounds are approximate and labeled; they are not exact administrative borders.
+Satellite speeds/positions are dated orbital estimates. Aggregations query the latest stored Redis data
+every two seconds without regenerating the model query; **Dismiss** cancels requests and stops refreshes.
+The **Query** disclosure shows the executed `FT.SEARCH` or `FT.AGGREGATE` command.
+
+Requires Redis ON. Custom requests and voice input require server-side `OPENAI_API_KEY`; quick searches do not. Optional overrides are `OPENAI_REDIS_SEARCH_MODEL`
+(default `gpt-5.6-terra`) and `OPENAI_REDIS_TRANSCRIBE_MODEL` (default `gpt-4o-mini-transcribe`).
+Keys stay server-side. Query generation uses [structured model output](https://developers.openai.com/api/docs/guides/structured-outputs)
+and recordings use [file transcription](https://developers.openai.com/api/docs/guides/speech-to-text).
+The original conversational voice agent is replaced by Redis Search in this beta UI.

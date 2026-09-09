@@ -211,7 +211,7 @@ export function createRedisControl(manager) {
   const note = document.createElement('span');
   note.className = 'redis-mode-note';
   note.setAttribute('role', 'status');
-  note.textContent = redisEnabled() ? 'Redis entities' : 'Original GEV';
+  note.textContent = redisEnabled() ? '' : 'Original GEV';
   const warning = document.createElement('button');
   warning.type = 'button';
   warning.className = 'redis-mode-warning';
@@ -230,7 +230,7 @@ export function createRedisControl(manager) {
       sessionStorage.setItem('gev.redis', redisEnabled() ? 'no' : 'yes');
       location.reload();
     } catch (error) {
-      note.textContent = redisEnabled() ? 'Redis entities' : 'Original GEV';
+      note.textContent = redisEnabled() ? '' : 'Original GEV';
       warning.textContent = `⚠ ${error.message}`;
       warning.hidden = false;
       button.disabled = false;

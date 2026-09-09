@@ -97,7 +97,7 @@ export function entityDocument(layer, cohort, record) {
   const longitude = number(isState ? source[5] : source?.lon ?? source?.longitude ?? coordinates[0]);
   const altitudeM = number(isState ? source[7] : layer === 'military' && number(source?.alt_baro) !== null ? Number(source.alt_baro) * 0.3048 : source?.altitudeM);
   const speedMps = number(isState ? source[9] : layer === 'military' && number(source?.gs) !== null ? Number(source.gs) * 0.514444 : source?.speedMps);
-  return { id: record.item, layer, kind: record.kind,
+  const document = { id: record.item, layer, kind: record.kind,
     label: String((isState ? source[1] : source?.callsign ?? source?.flight ?? source?.name ?? source?.properties?.name) || record.item).trim(),
     latitude, longitude, altitudeM, speedMps,
     location: latitude !== null && longitude !== null && Math.abs(latitude) <= 90 && Math.abs(longitude) <= 180 ? `${longitude},${latitude}` : null,
@@ -105,6 +105,8 @@ export function entityDocument(layer, cohort, record) {
     ...(layer === 'radio' && record.kind === 'stations' ? {categories:radioCategories(source)} : {}),
     ...(isState ? record.enrichment : {}),
     ...(layer === 'satellites' && source.text ? satelliteFields(source.text, record.satelliteGroup) : {}) };
+  document.geoLocation = Number.isFinite(document.latitude) && Number.isFinite(document.longitude) && Math.abs(document.latitude) <= 85.05112878 && Math.abs(document.longitude) <= 180 ? `${document.longitude},${document.latitude}` : null;
+  return document;
 }
 
 export function unpackBody(manifest, fields) {

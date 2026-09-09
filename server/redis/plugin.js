@@ -1,3 +1,4 @@
+import {createUserSearch} from './userSearch.js';
 import {militaryQuery} from './militarySearch.js';
 import {radioQuery} from './radioSearch.js';
 import {aisQuery} from './aisSearch.js';
@@ -57,6 +58,7 @@ export function redisLayersPlugin({pipelineOptions} = {}) {
     name: 'gev-redis-layers',
     configureServer(server) {
       pipeline = new RedisPipeline(pipelineOptions);
+      const userSearch = createUserSearch(pipeline);
       server.middlewares.use('/api/redis', async (req, res) => {
         const route = new URL(req.url, 'http://localhost').pathname;
         let requestLayer = null;
@@ -69,6 +71,7 @@ export function redisLayersPlugin({pipelineOptions} = {}) {
           if (!res.writableEnded) controller.abort();
         });
         try {
+          if (await userSearch(route, req, res, signal)) return;
           if (route === '/status' && req.method === 'GET') {
             await pipeline.connect();
             const layers = await pipeline.stats();

@@ -101,7 +101,7 @@ export class ShareLinkManager {
     this._bloomIntensity = BLOOM_INTENSITY_DEFAULT;
     this._bloomVersion = BLOOM_SCALE_VERSION;
     this._sharpenIntensity = 49;
-    this._hudVariant = 'tactical';
+    this._hudVariant = 'minimal';
     this._hudVisible = false;
     this._detectionMode = 'OFF';
     this._detectionDensity = 50;
@@ -190,7 +190,7 @@ export class ShareLinkManager {
       bloomIntensity: parseOr(params.get('bi'), LEGACY_BLOOM_FALLBACK),
       bloomVersion: parseOr(params.get('bv'), 1),
       sharpenIntensity: parseOr(params.get('si'), 49),
-      hudVariant: params.get('hud') || 'tactical',
+      hudVariant: params.get('hud') || 'minimal',
       hudVisible: params.get('hv') === '1',
       detectionMode: restoredDetection.enabled ? restoredDetection.profile : 'OFF',
       detectionDensity: restoredDetection.densityPct,

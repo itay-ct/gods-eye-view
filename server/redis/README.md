@@ -332,3 +332,32 @@ The consumer increments `CMS.INCRBY` for every entity applied by a completed pro
 values are unchanged. Re-delivering the completed commit does not count twice. Cancelled partial snapshots
 that never commit do not count as projected updates. Existing sketches retain their previous counts; the new
 per-update semantics apply from this change onward. Flush Redis for a fresh demo count.
+
+## Natural-language search (beta)
+
+`POST /api/redis/search/transcribe` accepts a bounded audio recording; `/search/plan` reads `FT._LIST`
+and `FT.INFO`, obtains a structured Terra plan, and compiles it into an allowed command. `/search/run`
+accepts only a server-issued plan ID, not arbitrary command arguments. Commands have a one-second
+Redis timeout and at most 20 returned rows. Aggregations compute across the matching set before limiting
+output rows. Concurrent runs of the same plan are rejected; UI refreshes never overlap.
+
+Existing entity indexes gain ID, speed, altitude, latitude/longitude and GEO fields on first search.
+`geoLocation` is a nullable GEO-safe projection of the same coordinates: Redis GEO excludes polar
+latitudes beyond ±85.05112878°, while numeric coordinate fields preserve those entities for other queries.
+Existing JSON documents gain this derived field in bounded pipelines; new projection records include it.
+The original `location` and source measurements are preserved. Index setup does not increment CMS counts.
+Geo radius and approximate area queries use Redis Search, nearest lookup uses `geodistance`, and numeric
+aggregates exclude missing measurements. Empty aggregates display no matches, never a fabricated zero.
+
+Query planning also receives the top 20 existing values and counts for satellite/aircraft types,
+datacenter operators, and radio tags. Scalar fields use a bounded `FT.AGGREGATE` grouping. Radio tags
+are multi-valued: `FT.TAGVALS` discovers the small category vocabulary, then pipelined `FT.AGGREGATE`
+counts each tag independently so secondary tags are included. Suggestions are not exhaustive.
+The current tab's layer availability accompanies planning and execution. Disabled layers produce
+an enable-layer message even if Redis retains their documents; disabling an active aggregate stops it.
+
+`POST /api/redis/search/preset` accepts an allowlisted preset ID plus current selection/view and layer
+states. The server builds the query itself, checks only the target index (without categorical sampling),
+and returns a plan ID for the same execution/refresh path. No OpenAI call is made. The first search may
+initialize missing common index fields; subsequent clicks run against the existing schema. Preset
+coordinates are captured when clicked, so a live aggregation keeps its requested area until dismissed.
