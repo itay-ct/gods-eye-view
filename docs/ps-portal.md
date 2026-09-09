@@ -44,29 +44,31 @@ Local `.env` values are picked up by Compose, but **never copied into the image*
 Build context uses an allowlist that excludes local keys, Git metadata, logs,
 caches, and the Terraform credentials file. No PS token belongs in `.env`.
 
-## Build a GCP image
+## Build a GCP image with Backstage
 
-Follows the PS [Image Builder guide](https://redislabs.atlassian.net/wiki/spaces/PS/pages/5790924827/Ps-Portal+Image+Builder+Guide)
-and its [GitHub Actions instructions](https://redislabs.atlassian.net/wiki/spaces/PS/pages/6336610353/Ps-Portal+Image+Builder+-+GitHub+Actions).
-The required `docker-compose.yml`, `build.sh`, and executable `start.sh` are at
-the repository root. Packer builds and saves the Docker image during baking.
+Follow the [PS Backstage image-builder guide](https://redislabs.atlassian.net/wiki/spaces/PS/pages/6337560612/Ps-Portal+Image+Builder+-+Backstage).
+The required Compose file and executable `start.sh`, plus `build.sh`, are at the
+repository root. Packer builds and saves the Docker image during baking.
 
-1. Push this implementation to GitHub.
-2. Set the repository Actions secret `PS_IMAGE_BUILDER_TOKEN` to a valid PS
-   token permitted to dispatch `Redis-ProfessionalService/ps-portal-image-builder`.
-3. For a private source repo, also set `SOURCE_REPO_READ_TOKEN` to a read-only
-   source PAT. The public source repo can use the PS token for the clone too.
-4. Run **Build PS Portal image** on the desired branch with a new version such
-   as `1.0.0`. The source is pinned to that run's exact commit.
-5. Follow the linked infrastructure run through completion. Retrieve the
-   `image-manifest` artifact and its `image_version` field.
-6. In PS Portal choose **I've my own image**, use that manifest value as
-   **Image location**, and use application port **80**. Supply provider variables
-   at launch. The expected family for this repo at 1.0.0 is
-   `portal-images-gods-eye-view-1-0-0`; use the successful manifest as authority.
+1. Open <https://backstage.ps-redis.com/> and sign in with Okta.
+2. Select **Create → Build PS Portal Image**.
+3. Use source repository `https://github.com/itay-ct/gods-eye-view`, the tested
+   commit SHA from `codex/ps-portal-all-in-one`, and a new version such as
+   `1.0.0`. Leave **Source Directory** empty.
+4. Supply a valid GitHub **Repository Access Token** with source read access.
+   Backstage requires this even for the public repository. Do not put it in
+   application files or provider settings.
+5. Keep the PS project, region, zone, and disk defaults from the live form.
+6. Review and create. Wait for the build to succeed and retrieve **Image Family**
+   from the catalog entry. The expected 1.0.0 family is
+   `portal-images-gods-eye-view-1-0-0`; the successful build result is authoritative.
+7. To deploy, use **Create → Launch PS Portal Image**, select that family, and
+   application port **80**. Configure provider keys at runtime with POWER UP.
 
-The caller dispatch succeeding only means the build was requested. The GCP image
-is ready only when the infrastructure run succeeds and publishes its manifest.
+No direct GCP credentials or PS builder-dispatch token are needed through
+Backstage. The repository's GitHub Actions trigger remains an optional legacy
+route; it is not used by these steps. A submitted build is not a ready image:
+wait for the infrastructure run to succeed and publish its result.
 
 ## Verification and logs
 
