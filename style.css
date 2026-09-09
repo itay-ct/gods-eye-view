@@ -9615,7 +9615,7 @@ body.scene-playback-mode #key-setup {
 .redis-mode-note:empty { display: none; }
 
 /* Redis Search shares the dock's hover tray / pin vocabulary. */
-#command-dock > #redis-search-panel { order: 1; position: relative; min-width: var(--dock-side-compact); }
+#command-dock > #redis-search-panel { order: 1; position: relative; min-width: var(--dock-side-compact); align-self: stretch; display: flex; }
 #redis-search-panel .redis-search-toggle { width: 100%; min-height: 2rem; padding: .6rem .8rem; background: none; border: 0; color: #c3d5d0; font: inherit; font-size: .55rem; letter-spacing: .12rem; text-transform: uppercase; cursor: pointer; }
 #command-dock #redis-search-output { position: absolute; left: 50%; width: min(680px, calc(100vw - 64px)); max-height: none; overflow: visible; padding: .7rem; transform: translate(-50%, .55rem); font: 11px/1.5 monospace; }
 #command-dock #redis-search-panel:not(.collapsed) #redis-search-output { visibility: visible; opacity: 1; pointer-events: auto; transform: translate(-50%, 0); }
@@ -9623,6 +9623,8 @@ body.scene-playback-mode #key-setup {
 #redis-search-output .redis-search-compose { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; align-items: start; }
 #redis-search-output form { align-items: center; flex-wrap: wrap; gap: 6px; }
 #redis-search-output input { flex: 1 1 0; font-size: 11px; }
+#redis-search-output input:disabled { opacity: .45; cursor: not-allowed; }
+#redis-search-output form button:disabled { opacity: .35; cursor: not-allowed; }
 #redis-search-output .redis-search-presets { display: flex; flex-direction: column; gap: 5px; }
 #redis-search-output .location-pill { width: 100%; text-align: left; white-space: normal; font-size: 10px; padding: 5px 8px; }
 #redis-search-output .redis-search-response { max-height: 32vh; overflow: auto; margin-top: 12px; border-top: 1px solid #78968b33; padding-top: 10px; }
