@@ -1,0 +1,24 @@
+# Only application inputs enter the build context. Never copy local credentials.
+*
+!package.json
+!package-lock.json
+!vite.config.js
+!index.html
+!style.css
+!src/
+!src/**
+!server/
+!server/**
+!public/
+!public/**
+!config/
+!config/**
+!scripts/
+!scripts/pinokio-environment.mjs
+!docker/
+!docker/**
+!LICENSE
+**/.env*
+**/*.pem
+**/*.key
+**/.DS_Store

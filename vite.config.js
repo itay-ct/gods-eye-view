@@ -7504,7 +7504,9 @@ function keySetupEndpoint() {
   // plain `npm run dev` to write the Pinokio store it never loaded.
   const pinokioManaged = () => LAUNCHER_AT_BOOT === 'pinokio';
   const storeName = () => (pinokioManaged() ? 'pinokio-environment' : 'env-file');
-  const storePath = () => path.join(__dirname, ...(pinokioManaged() ? ['pinokio', 'ENVIRONMENT'] : ['.env']));
+  const storePath = () => pinokioManaged()
+    ? path.join(__dirname, 'pinokio', 'ENVIRONMENT')
+    : path.join(process.env.GEV_ENV_DIR || __dirname, '.env');
   // Read the store, distinguishing "no store yet" from "cannot read this
   // store". Only ENOENT means empty. Every other failure — a permission error,
   // an I/O fault, an undecodable file — must ABORT the save: upserting into a
@@ -7730,15 +7732,17 @@ function keySetupEndpoint() {
  * API keys to the client as import.meta.env defines.
  */
 export default defineConfig(({ mode }) => {
-  // Load only this checkout's dotenv files. Shell/Keychain values still win,
-  // and no sibling workspace is consulted implicitly.
-  const loaded = loadEnv(mode, __dirname, '');
+  // Containers may explicitly place runtime settings on a persistent volume.
+  // Otherwise load this checkout's dotenv files. Shell/Keychain values still win.
+  const envDir = process.env.GEV_ENV_DIR || __dirname;
+  const loaded = loadEnv(mode, envDir, '');
   for (const [key, val] of Object.entries(loaded)) {
     if (process.env[key] === undefined) process.env[key] = val;
   }
   const env = { ...process.env };
   const localAllowedHosts = ['localhost', '127.0.0.1', '.local'];
   return {
+    envDir,
     plugins: [
       cesium(),
       redisLayersPlugin(),

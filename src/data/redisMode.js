@@ -247,7 +247,22 @@ export function createRedisControl(manager) {
       const message=redisWarning(manager);warning.textContent=message ? `⚠ ${message} · Retry` : '';warning.hidden=!message;
     }
   });
-  root.append(button, note, warning);
+  const controls = document.createElement('div');
+  controls.className = 'redis-mode-actions';
+  controls.append(button);
+  const insightUrl = import.meta.env?.VITE_REDISINSIGHT_URL;
+  if (insightUrl) {
+    const insight = document.createElement('a');
+    insight.className = 'redisinsight-link';
+    insight.href = insightUrl;
+    insight.target = '_blank';
+    insight.rel = 'noopener noreferrer';
+    insight.title = 'Open RedisInsight connected to GEV Redis (new tab)';
+    insight.setAttribute('aria-label', insight.title);
+    insight.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 3h6v6M21 3l-9 9M10 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-5"/></svg>';
+    controls.append(insight);
+  }
+  root.append(controls, note, warning);
   if (redisEnabled() && !manager._redisStatsTimer) {
     const poll = async () => {
       if (document.hidden || manager._redisStatsLoading || manager._redisRetrying) return;

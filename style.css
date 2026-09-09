@@ -5933,6 +5933,10 @@ body.cockpit-mode #intel-hud .hud-right-edge { right: 22px; }
 }
 .redis-mode-switch:focus-visible { outline: 1px solid #ff665d; outline-offset: 4px; }
 .redis-mode-switch:disabled { opacity: .6; cursor: wait; }
+.redis-mode-actions { display: flex; align-items: center; gap: 6px; }
+.redisinsight-link { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; color: var(--text-secondary, #bbb); border-radius: 4px; }
+.redisinsight-link:hover { color: #ff665d; background: rgba(255,102,93,.1); }
+.redisinsight-link:focus-visible { outline: 1px solid #ff665d; outline-offset: 2px; }
 .redis-switch-track { width: 28px; height: 16px; border-radius: 12px; background: #555; padding: 3px; box-sizing: border-box; }
 .redis-switch-track::after { content: ''; display: block; width: 10px; height: 10px; border-radius: 50%; background: #eee; }
 .redis-mode-switch[aria-checked="true"] .redis-switch-track { background: #dc453e; }

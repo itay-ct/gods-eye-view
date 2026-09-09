@@ -1,0 +1,24 @@
+services:
+  gev:
+    image: gev-ps-portal:1.0.0
+    build: .
+    restart: unless-stopped
+    ports:
+      - "${GEV_BIND_ADDRESS:-0.0.0.0}:${GEV_HTTP_PORT:-80}:8080"
+    environment:
+      REDIS_MAXMEMORY: ${REDIS_MAXMEMORY:-2gb}
+      GOOGLE_MAPS_API_KEY: ${GOOGLE_MAPS_API_KEY:-}
+      CESIUM_ION_TOKEN: ${CESIUM_ION_TOKEN:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENSKY_CLIENT_ID: ${OPENSKY_CLIENT_ID:-}
+      OPENSKY_CLIENT_SECRET: ${OPENSKY_CLIENT_SECRET:-}
+      AISSTREAM_API_KEY: ${AISSTREAM_API_KEY:-}
+      TOMTOM_API_KEY: ${TOMTOM_API_KEY:-}
+      FIRMS_MAP_KEY: ${FIRMS_MAP_KEY:-}
+      LL2_API_TOKEN: ${LL2_API_TOKEN:-}
+    volumes:
+      - gev-data:/data
+    stop_grace_period: 45s
+    shm_size: 256mb
+volumes:
+  gev-data:

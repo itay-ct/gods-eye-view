@@ -21,6 +21,9 @@ automatic `ON JSON` indexes and inline filters that read through `FT.SEARCH`. Ci
 operators use `FT.AGGREGATE` for ranked dropdown counts. See the
 [Search examples](server/redis/README.md#redis-search-readiness).
 
+**PS Portal / Docker:** [Run GEV, Redis, and RedisInsight in one container](docs/ps-portal.md).
+The Redis toggle includes a shortcut to the bundled RedisInsight database browser.
+
 ## What this fork adds
 
 | Change | Behavior |

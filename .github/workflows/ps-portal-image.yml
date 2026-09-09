@@ -1,0 +1,45 @@
+name: Build PS Portal image
+on:
+  workflow_dispatch:
+    inputs:
+      image_version:
+        description: 'New image version (X.Y.Z)'
+        required: true
+        default: '1.0.0'
+        type: string
+permissions:
+  contents: read
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch PS image build
+        uses: actions/github-script@v7
+        env:
+          IMAGE_VERSION: ${{ inputs.image_version }}
+          SOURCE_REPO_READ_TOKEN: ${{ secrets.SOURCE_REPO_READ_TOKEN || secrets.PS_IMAGE_BUILDER_TOKEN }}
+        with:
+          github-token: ${{ secrets.PS_IMAGE_BUILDER_TOKEN }}
+          script: |
+            const version = process.env.IMAGE_VERSION;
+            if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error('Use X.Y.Z for image_version');
+            const repository = `${context.repo.owner}/${context.repo.repo}`;
+            // The receiving workflow expects base64, which is encoding, not encryption.
+            const cloneToken = Buffer.from(process.env.SOURCE_REPO_READ_TOKEN).toString('base64');
+            core.setSecret(cloneToken);
+            await github.rest.repos.createDispatchEvent({
+              owner: 'Redis-ProfessionalService', repo: 'ps-portal-image-builder',
+              event_type: 'build-image',
+              client_payload: {
+                source_repo_url: `https://github.com/${repository}`,
+                source_repo_ref: context.sha,
+                image_name: repository,
+                image_version: version,
+                source_dir: '',
+                clone_token: cloneToken,
+              },
+            });
+            await core.summary.addHeading('PS Portal build requested')
+              .addRaw(`Source commit: ${context.sha}\n\n`)
+              .addLink('Track image build and download its manifest', 'https://github.com/Redis-ProfessionalService/ps-portal-image-builder/actions/workflows/infra-build.yaml')
+              .write();
