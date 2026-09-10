@@ -11,6 +11,8 @@
  * behavior below unit-testable.
  */
 
+import {configuredOrigins} from './deploymentOrigin.mjs';
+
 /** Longest accepted key/token value. Real provider keys are all far shorter. */
 export const KEY_SETUP_VALUE_LIMIT = 512;
 
@@ -230,6 +232,7 @@ export function admitKeySetupRequest({
     return { ok: false, status: 403, error: 'Provider Settings answers only the machine running the server' };
   }
   let authority = localAuthority(hostHeader, protocol);
+  const publicOrigins = trustedProxy ? configuredOrigins(env) : null;
   if (trustedProxy) {
     const scheme = proxyHeaders['x-forwarded-proto'];
     try {
@@ -239,6 +242,7 @@ export function admitKeySetupRequest({
         && address.pathname === '/' && !address.search && !address.hash
         ? address.origin : null;
     } catch { authority = null; }
+    if (publicOrigins !== null) authority = publicOrigins[0] || null;
   }
   if (!authority) {
     return { ok: false, status: 403, error: 'Provider Settings answers only local hostnames' };
@@ -258,7 +262,7 @@ export function admitKeySetupRequest({
       && parsedOrigin.pathname === '/'
       && parsedOrigin.search === ''
       && parsedOrigin.hash === ''
-      && parsedOrigin.origin === authority;
+      && (publicOrigins !== null ? publicOrigins.includes(parsedOrigin.origin) : parsedOrigin.origin === authority);
     if (!exactOrigin) {
       return { ok: false, status: 403, error: 'Cross-origin requests are refused' };
     }

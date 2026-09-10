@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
+# Both portal launchers expose the same VM through exact, predictable aliases.
+# Discover those from non-secret GCP metadata on each boot. Local Docker falls
+# back to the normal Host check; explicit deployment configuration wins.
+if [[ -z "${GEV_PUBLIC_ORIGIN:-}" && -z "${GEV_PUBLIC_ORIGINS:-}" ]]; then
+  export GEV_PUBLIC_ORIGINS="$(/opt/gev-node/node /opt/gev/docker/discover-origin.mjs)"
+fi
 mkdir -p /data/redis /data/redisinsight /data/gev /tmp/nginx
 # Keep runtime provider settings and source caches across container recreation.
 touch /data/gev/.env

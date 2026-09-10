@@ -72,16 +72,30 @@ wait for the infrastructure run to succeed and publish its result.
 
 ### Portal rewrites the Host header
 
-If Redis is healthy but layer ingestion reports `Same-origin requests only`,
-set the runtime variable `GEV_PUBLIC_ORIGIN` to the exact public application
-origin, for example `https://rl-s-labs-uwzdaa.labs.ps-redis.com` (no URL fragment
-or path). Recreate the container with `./start.sh` after setting the variable.
-This requires an image containing the public-origin fix; version 1.0.0 does not
-read this variable. The setting is not a provider key and does not go in POWER UP.
+The corrected 1.0.1 image discovers its VM name and `DOMAIN` from non-secret
+GCP metadata at startup. It accepts only that VM's two portal HTTPS origins:
+`https://<instance>.labs.ps-redis.com` and
+`https://80-p-<instance>.labs.ps-redis.com`. This applies to Redis ingestion and
+POWER UP. Fresh launches need no custom variables or startup scripts.
+
+For a different deployment, set `GEV_PUBLIC_ORIGIN` to its exact public origin
+(no path or fragment), or `GEV_PUBLIC_ORIGINS` to a comma-separated list of exact
+origins. Explicit configuration takes precedence over discovery. Local Docker
+without GCP metadata retains normal Host-based checks. These settings are not
+provider keys and do not go in POWER UP.
+
+The first 1.0.1 build (`gods-eye-view-20260910042831`) required explicit origin
+configuration; use the latest successful image in the 1.0.1 family for discovery.
+Version 1.0.0 does not support these settings.
 
 The origin check still rejects other websites. Redis-off requests bypass the
 ingestion endpoint, so direct layers can work while Redis-on layers are rejected.
 Changing a local checkout or baking a new image does not update an existing VM.
+
+The legacy portal's lab network currently has no `ps-infra-prod-labs` subnet in
+`europe-west1`. Building an image in Belgium succeeds, but launching there fails
+unless the platform team supplies a compatible regional subnet. The supported
+default launch region is `us-east1`.
 
 ## Verification and logs
 
