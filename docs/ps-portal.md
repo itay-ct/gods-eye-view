@@ -70,6 +70,19 @@ Backstage. The repository's GitHub Actions trigger remains an optional legacy
 route; it is not used by these steps. A submitted build is not a ready image:
 wait for the infrastructure run to succeed and publish its result.
 
+### Portal rewrites the Host header
+
+If Redis is healthy but layer ingestion reports `Same-origin requests only`,
+set the runtime variable `GEV_PUBLIC_ORIGIN` to the exact public application
+origin, for example `https://rl-s-labs-uwzdaa.labs.ps-redis.com` (no URL fragment
+or path). Recreate the container with `./start.sh` after setting the variable.
+This requires an image containing the public-origin fix; version 1.0.0 does not
+read this variable. The setting is not a provider key and does not go in POWER UP.
+
+The origin check still rejects other websites. Redis-off requests bypass the
+ingestion endpoint, so direct layers can work while Redis-on layers are rejected.
+Changing a local checkout or baking a new image does not update an existing VM.
+
 ## Verification and logs
 
 ```sh

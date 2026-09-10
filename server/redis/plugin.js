@@ -1,4 +1,5 @@
 import {createUserSearch} from './userSearch.js';
+import {redisRequestOriginAllowed} from './requestOrigin.js';
 import {militaryQuery} from './militarySearch.js';
 import {radioQuery} from './radioSearch.js';
 import {aisQuery} from './aisSearch.js';
@@ -137,8 +138,7 @@ export function redisLayersPlugin({pipelineOptions} = {}) {
             return res.end(body);
           }
           if (route === '/retry' && req.method === 'POST') {
-            const origin=req.headers.origin;
-            if(origin && new URL(origin).host!==req.headers.host) return json(res,403,{error:'Same-origin requests only'});
+            if(!redisRequestOriginAllowed(req)) return json(res,403,{error:'Same-origin requests only'});
             if(!req.headers['content-type']?.startsWith('application/json')) return json(res,415,{error:'JSON required'});
             const body=await readRequest(req);
             if(!Array.isArray(body.layers) || body.layers.some(layer=>!Object.hasOwn(paths,layer))) return json(res,400,{error:'Invalid layers'});
@@ -150,8 +150,7 @@ export function redisLayersPlugin({pipelineOptions} = {}) {
           }
           if (!['/ingest', '/local'].includes(route) || req.method !== 'POST') return json(res, 404, { error: 'Unknown Redis endpoint' });
           // JSON + same-origin checks prevent a third-party page driving local ingestion.
-          const origin = req.headers.origin;
-          if (origin && new URL(origin).host !== req.headers.host) return json(res, 403, { error: 'Same-origin requests only' });
+          if (!redisRequestOriginAllowed(req)) return json(res, 403, { error: 'Same-origin requests only' });
           if (!req.headers['content-type']?.startsWith('application/json')) return json(res, 415, { error: 'JSON required' });
           const request = await readRequest(req);
           if (Object.hasOwn(paths, request.layer)) requestLayer = request.layer;
