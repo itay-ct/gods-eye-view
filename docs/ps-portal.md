@@ -54,14 +54,14 @@ repository root. Packer builds and saves the Docker image during baking.
 2. Select **Create → Build PS Portal Image**.
 3. Use source repository `https://github.com/itay-ct/gods-eye-view`, the tested
    commit SHA from `codex/ps-portal-all-in-one`, and a new version such as
-   `1.0.0`. Leave **Source Directory** empty.
+   `1.0.1`. Leave **Source Directory** empty.
 4. Supply a valid GitHub **Repository Access Token** with source read access.
    Backstage requires this even for the public repository. Do not put it in
    application files or provider settings.
 5. Keep the PS project, region, zone, and disk defaults from the live form.
 6. Review and create. Wait for the build to succeed and retrieve **Image Family**
-   from the catalog entry. The expected 1.0.0 family is
-   `portal-images-gods-eye-view-1-0-0`; the successful build result is authoritative.
+   from the catalog entry. The expected 1.0.1 family is
+   `portal-images-gods-eye-view-1-0-1`; the successful build result is authoritative.
 7. To deploy, use **Create → Launch PS Portal Image**, select that family, and
    application port **80**. Configure provider keys at runtime with POWER UP.
 

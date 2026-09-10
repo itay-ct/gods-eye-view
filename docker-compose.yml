@@ -1,6 +1,6 @@
 services:
   gev:
-    image: gev-ps-portal:1.0.0
+    image: gev-ps-portal:1.0.1
     build: .
     restart: unless-stopped
     ports:

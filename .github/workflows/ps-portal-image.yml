@@ -5,7 +5,7 @@ on:
       image_version:
         description: 'New image version (X.Y.Z)'
         required: true
-        default: '1.0.0'
+        default: '1.0.1'
         type: string
 permissions:
   contents: read
